@@ -1,0 +1,12 @@
+backend/contextpool
+backend/contextpool.db
+backend/contextpool.db-*
+backend/*.db.*.bak
+backend/target/
+backend/coverage.out
+backend/.cache/
+**/__pycache__/
+**/*.py[cod]
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/

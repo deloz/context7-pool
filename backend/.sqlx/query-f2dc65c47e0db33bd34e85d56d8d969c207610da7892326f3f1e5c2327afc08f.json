@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM admin_sessions WHERE admin_user_id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "f2dc65c47e0db33bd34e85d56d8d969c207610da7892326f3f1e5c2327afc08f"
+}

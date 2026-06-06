@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n                INSERT INTO context7_minute_stats\n                    (api_key_id, api_key_name, minute_at, total_requests, success_requests,\n                     failed_requests, status_2xx, status_4xx, status_5xx, network_errors,\n                     total_latency_ms, max_latency_ms, last_status_code, last_error, updated_at)\n                VALUES\n                    ($1, $2, $3, $4, $5,\n                     $6, $7, $8, $9, $10,\n                     $11, $12, $13, $14, $15)\n                ON CONFLICT (api_key_id, minute_at) DO UPDATE\n                SET api_key_name = EXCLUDED.api_key_name,\n                    total_requests = COALESCE(context7_minute_stats.total_requests, 0) + COALESCE(EXCLUDED.total_requests, 0),\n                    success_requests = COALESCE(context7_minute_stats.success_requests, 0) + COALESCE(EXCLUDED.success_requests, 0),\n                    failed_requests = COALESCE(context7_minute_stats.failed_requests, 0) + COALESCE(EXCLUDED.failed_requests, 0),\n                    status_2xx = COALESCE(context7_minute_stats.status_2xx, 0) + COALESCE(EXCLUDED.status_2xx, 0),\n                    status_4xx = COALESCE(context7_minute_stats.status_4xx, 0) + COALESCE(EXCLUDED.status_4xx, 0),\n                    status_5xx = COALESCE(context7_minute_stats.status_5xx, 0) + COALESCE(EXCLUDED.status_5xx, 0),\n                    network_errors = COALESCE(context7_minute_stats.network_errors, 0) + COALESCE(EXCLUDED.network_errors, 0),\n                    total_latency_ms = COALESCE(context7_minute_stats.total_latency_ms, 0) + COALESCE(EXCLUDED.total_latency_ms, 0),\n                    max_latency_ms = GREATEST(context7_minute_stats.max_latency_ms, EXCLUDED.max_latency_ms),\n                    last_status_code = EXCLUDED.last_status_code,\n                    last_error = EXCLUDED.last_error,\n                    updated_at = EXCLUDED.updated_at\n                ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Text",
+        "Timestamptz",
+        "Int4",
+        "Int4",
+        "Int4",
+        "Int4",
+        "Int4",
+        "Int4",
+        "Int4",
+        "Int8",
+        "Int8",
+        "Int4",
+        "Text",
+        "Timestamptz"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "4f0892d3a782a96296003508c1ca90bf8a3bb75b97a8a01c5d7c6c105ad758e3"
+}

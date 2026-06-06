@@ -1,0 +1,62 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            INSERT INTO relay_tokens (name, token_hash, token, masked_token, created_at)\n            VALUES ($1, $2, $3, $4, $5)\n            RETURNING id, name, token_hash, token, masked_token, created_at, last_used_at\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 1,
+        "name": "name",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "token_hash",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "token",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "masked_token",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 5,
+        "name": "created_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 6,
+        "name": "last_used_at",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Timestamptz"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      true,
+      false,
+      false,
+      true
+    ]
+  },
+  "hash": "59f6fc577f56c7e2932b466cc5a490b21260013c2d0ec81b0e9bbe139a3069bb"
+}

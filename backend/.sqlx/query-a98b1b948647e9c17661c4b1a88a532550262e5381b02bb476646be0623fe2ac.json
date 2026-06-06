@@ -1,0 +1,21 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n                UPDATE api_keys\n                SET health_status = $2,\n                    failure_streak = $3,\n                    cooldown_until = $4,\n                    last_error = $5,\n                    last_status_code = $6,\n                    last_success_at = COALESCE($7, last_success_at),\n                    updated_at = $8\n                WHERE id = $1\n                ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Text",
+        "Int4",
+        "Timestamptz",
+        "Text",
+        "Int4",
+        "Timestamptz",
+        "Timestamptz"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "a98b1b948647e9c17661c4b1a88a532550262e5381b02bb476646be0623fe2ac"
+}

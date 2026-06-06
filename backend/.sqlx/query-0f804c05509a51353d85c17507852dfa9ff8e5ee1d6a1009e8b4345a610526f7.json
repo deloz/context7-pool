@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE relay_tokens SET last_used_at = $2 WHERE id = $1 AND revoked_at IS NULL",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Timestamptz"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "0f804c05509a51353d85c17507852dfa9ff8e5ee1d6a1009e8b4345a610526f7"
+}

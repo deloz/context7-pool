@@ -1,0 +1,34 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT id, username, password_hash FROM admin_users WHERE id = $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 1,
+        "name": "username",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "password_hash",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "2c9128b25edde56e2c294e350511f03dca1af5ecfe45629218f96e0687aa424e"
+}

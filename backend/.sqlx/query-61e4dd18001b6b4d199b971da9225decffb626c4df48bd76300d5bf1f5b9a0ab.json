@@ -1,0 +1,86 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT id, name, api_key, enabled, health_status, failure_streak,\n                   cooldown_until, last_error, last_status_code, last_success_at,\n                   created_at, updated_at\n            FROM api_keys\n            ORDER BY id ASC\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 1,
+        "name": "name",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "api_key",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "enabled",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 4,
+        "name": "health_status",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 5,
+        "name": "failure_streak",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 6,
+        "name": "cooldown_until",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 7,
+        "name": "last_error",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 8,
+        "name": "last_status_code",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 9,
+        "name": "last_success_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 10,
+        "name": "created_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 11,
+        "name": "updated_at",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      true,
+      true,
+      true,
+      false,
+      false
+    ]
+  },
+  "hash": "61e4dd18001b6b4d199b971da9225decffb626c4df48bd76300d5bf1f5b9a0ab"
+}
