@@ -823,7 +823,7 @@ onMounted(() => {
               <h2>Minute Trend</h2>
               <p>默认展示最近 60 分钟的 key 分钟聚合。</p>
             </div>
-            <span>数据源：SQLite minute buckets</span>
+            <span>数据源：minute buckets</span>
           </div>
         </template>
 
