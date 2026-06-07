@@ -1,0 +1,52 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  ci:
+    name: Build and test
+    runs-on: ubuntu-latest
+    env:
+      CARGO_TERM_COLOR: always
+      SQLX_OFFLINE: "true"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Show Rust toolchain
+        run: rustup show
+
+      - name: Check Rust formatting
+        run: cargo fmt --manifest-path backend/Cargo.toml --check
+
+      - name: Run Rust clippy
+        run: cargo clippy --manifest-path backend/Cargo.toml --locked -- -D warnings
+
+      - name: Run Rust tests
+        run: cargo test --manifest-path backend/Cargo.toml --locked
+
+      - name: Install frontend dependencies
+        working-directory: frontend
+        run: npm ci
+
+      - name: Build frontend
+        working-directory: frontend
+        run: npm run build
+
+      - name: Build Docker image
+        run: docker build .
