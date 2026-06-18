@@ -288,7 +288,9 @@ const parsePositiveNumber = (value: string) => {
 }
 
 const parseStatusCode = () => {
-  const parsed = Number(statsFilters.statusCode)
+  const value = statsFilters.statusCode.trim()
+  if (!value) return undefined
+  const parsed = Number(value)
   return Number.isInteger(parsed) && parsed >= 0 ? parsed : undefined
 }
 
