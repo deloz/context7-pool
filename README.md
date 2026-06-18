@@ -105,15 +105,30 @@ Do not use an upstream Context7 API key as the relay bearer token. The relay bea
 
 ## Development
 
-Run backend tests:
+Install frontend dependencies when running frontend commands locally:
 
 ```bash
-cargo test --manifest-path backend/Cargo.toml --locked
+npm ci --prefix frontend
 ```
 
-Run the frontend build:
+Backend tests include PostgreSQL integration coverage. Start the local database first, or set `DATABASE_URL` to another reachable PostgreSQL database:
 
 ```bash
+docker compose up -d postgres
+```
+
+The default local test database URL is:
+
+```text
+postgres://contextpool:contextpool@127.0.0.1:45432/contextpool
+```
+
+Run quality checks:
+
+```bash
+cargo fmt --manifest-path backend/Cargo.toml --check
+cargo clippy --manifest-path backend/Cargo.toml --locked -- -D warnings
+cargo test --manifest-path backend/Cargo.toml --locked
 npm run build --prefix frontend
 ```
 
