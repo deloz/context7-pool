@@ -3,6 +3,7 @@ import { computed, onMounted, reactive, ref } from 'vue'
 import {
   CopyDocument,
   Delete,
+  Edit,
   Key,
   Lock,
   Plus,
@@ -18,7 +19,9 @@ import {
   changePassword,
   clearAdminToken,
   createKey,
+  createRelayToken,
   deleteKey,
+  deleteRelayToken,
   fetchAuthStatus,
   fetchContext7MinuteStats,
   fetchContext7RequestLogs,
@@ -27,17 +30,17 @@ import {
   fetchKey,
   fetchKeys,
   fetchMeta,
-  fetchRelayToken,
-  generateRelayToken,
+  fetchRelayTokens,
   loginAdmin,
   logoutAdmin,
+  rotateRelayToken,
   resetKeyHealth,
-  revokeRelayToken,
   setAdminToken,
   setUnauthorizedHandler,
   setupAdmin,
   updateContext7Settings,
   updateKey,
+  updateRelayToken,
 } from './api'
 import type {
   Context7MinuteStat,
@@ -45,7 +48,8 @@ import type {
   Context7Settings,
   Context7StatsSummary,
   KeyItem,
-  RelayTokenView,
+  RelayTokenItem,
+  RelayTokenPage,
   RuntimeMeta,
 } from './types'
 
@@ -59,6 +63,7 @@ const saving = ref(false)
 const settingsSaving = ref(false)
 const passwordSaving = ref(false)
 const relaySaving = ref(false)
+const relayLoading = ref(false)
 const statsLoading = ref(false)
 
 const dialogVisible = ref(false)
@@ -67,12 +72,17 @@ const passwordDialogVisible = ref(false)
 const relayDialogVisible = ref(false)
 const relayRevealVisible = ref(false)
 const editingId = ref<number | null>(null)
+const relayEditingId = ref<number | null>(null)
 
 const keys = ref<KeyItem[]>([])
 const meta = ref<RuntimeMeta | null>(null)
 const context7Settings = ref<Context7Settings | null>(null)
-const relayToken = ref<RelayTokenView>({ configured: false })
+const relayTokens = ref<RelayTokenItem[]>([])
+const relayTokenTotal = ref(0)
+const relayTokenPage = ref(1)
+const relayTokenPageSize = ref(10)
 const relayTokenPlain = ref('')
+const revealedRelayTokenName = ref('')
 const statsSummary = ref<Context7StatsSummary | null>(null)
 const statsMinutes = ref<Context7MinuteStat[]>([])
 const statsLogs = ref<Context7RequestLog[]>([])
@@ -117,8 +127,9 @@ const statsFilters = reactive({
 })
 
 const isEditing = computed(() => editingId.value !== null)
-const activeRelayToken = computed(() => relayToken.value.token || relayTokenPlain.value)
-const relayMCPArgument = computed(() => (activeRelayToken.value ? `--api-key ${activeRelayToken.value}` : ''))
+const isRelayEditing = computed(() => relayEditingId.value !== null)
+const relayDialogTitle = computed(() => (isRelayEditing.value ? '编辑 Relay Token' : '新建 Relay Token'))
+const relayMCPArgument = computed(() => (relayTokenPlain.value ? `--api-key ${relayTokenPlain.value}` : ''))
 const statsSuccessPercent = computed(() => formatPercent(statsSummary.value?.success_rate ?? 0))
 
 let unauthorizedNoticeOpen = false
@@ -221,7 +232,7 @@ const loadData = async () => {
       fetchMeta(),
       fetchKeys(),
       fetchContext7Settings(),
-      fetchRelayToken(),
+      fetchRelayTokens(relayQueryParams()),
       fetchContext7StatsSummary(),
       fetchContext7MinuteStats(minuteQueryParams()),
       fetchContext7RequestLogs(logQueryParams()),
@@ -229,7 +240,7 @@ const loadData = async () => {
     meta.value = metaResponse
     keys.value = keysResponse
     context7Settings.value = settingsResponse
-    relayToken.value = relayResponse
+    applyRelayTokenPage(relayResponse)
     statsSummary.value = summaryResponse
     statsMinutes.value = minuteResponse.items
     statsLogs.value = logResponse.items
@@ -240,6 +251,34 @@ const loadData = async () => {
     ElMessage.error((error as Error).message)
   } finally {
     loading.value = false
+  }
+}
+
+const relayQueryParams = () => ({
+  page: relayTokenPage.value,
+  page_size: relayTokenPageSize.value,
+})
+
+const applyRelayTokenPage = (response: RelayTokenPage) => {
+  relayTokens.value = response.items
+  relayTokenTotal.value = response.total
+  relayTokenPage.value = response.page
+  relayTokenPageSize.value = response.page_size
+}
+
+const loadRelayTokens = async () => {
+  relayLoading.value = true
+  try {
+    let response = await fetchRelayTokens(relayQueryParams())
+    if (response.items.length === 0 && response.total > 0 && response.page > 1) {
+      relayTokenPage.value = response.page - 1
+      response = await fetchRelayTokens(relayQueryParams())
+    }
+    applyRelayTokenPage(response)
+  } catch (error) {
+    ElMessage.error((error as Error).message)
+  } finally {
+    relayLoading.value = false
   }
 }
 
@@ -463,20 +502,39 @@ const submitSettingsForm = async () => {
   }
 }
 
-const openRelayDialog = () => {
-  relayForm.name = relayToken.value.name ?? 'context7-relay'
+const openCreateRelayDialog = () => {
+  relayEditingId.value = null
+  relayForm.name = 'context7-relay'
+  relayDialogVisible.value = true
+}
+
+const openEditRelayDialog = (row: RelayTokenItem) => {
+  relayEditingId.value = row.id
+  relayForm.name = row.name
   relayDialogVisible.value = true
 }
 
 const submitRelayToken = async () => {
+  if (!relayForm.name.trim()) {
+    ElMessage.error('名称不能为空')
+    return
+  }
+
   relaySaving.value = true
   try {
-    const created = await generateRelayToken({ name: relayForm.name })
-    relayTokenPlain.value = created.token
+    if (isRelayEditing.value && relayEditingId.value !== null) {
+      await updateRelayToken(relayEditingId.value, { name: relayForm.name })
+      relayDialogVisible.value = false
+      ElMessage.success('Relay token 已更新')
+      await loadRelayTokens()
+      return
+    }
+
+    const created = await createRelayToken({ name: relayForm.name })
+    showRelayToken(created.name, created.token)
     relayDialogVisible.value = false
-    relayRevealVisible.value = true
-    relayToken.value = await fetchRelayToken()
-    ElMessage.success('Relay token updated')
+    ElMessage.success('Relay token 已创建')
+    await loadRelayTokens()
   } catch (error) {
     ElMessage.error((error as Error).message)
   } finally {
@@ -484,23 +542,48 @@ const submitRelayToken = async () => {
   }
 }
 
-const copyRelayToken = async () => {
-  await copyText(activeRelayToken.value)
+const showRelayToken = (name: string, token: string) => {
+  revealedRelayTokenName.value = name
+  relayTokenPlain.value = token
+  relayRevealVisible.value = true
+}
+
+const copyRelayToken = async (row: RelayTokenItem) => {
+  await copyText(row.token ?? undefined)
+}
+
+const copyRevealedRelayToken = async () => {
+  await copyText(relayTokenPlain.value)
 }
 
 const copyAPIKey = async (row: KeyItem) => {
   await copyText(row.api_key)
 }
 
-const handleRevokeRelayToken = async () => {
+const handleRotateRelayToken = async (row: RelayTokenItem) => {
   try {
-    await ElMessageBox.confirm('撤销当前 relay token？', 'Confirm', {
+    await ElMessageBox.confirm(`轮换 Relay Token "${row.name}"？旧 token 将立即失效。`, 'Confirm', {
       type: 'warning',
     })
-    await revokeRelayToken()
-    relayToken.value = { configured: false }
-    relayTokenPlain.value = ''
-    ElMessage.success('Relay token revoked')
+    const rotated = await rotateRelayToken(row.id)
+    showRelayToken(rotated.name, rotated.token)
+    ElMessage.success('Relay token 已轮换')
+    await loadRelayTokens()
+  } catch (error) {
+    if (!isCancel(error)) {
+      ElMessage.error((error as Error).message)
+    }
+  }
+}
+
+const handleDeleteRelayToken = async (row: RelayTokenItem) => {
+  try {
+    await ElMessageBox.confirm(`删除 Relay Token "${row.name}"？删除后该 token 将无法继续访问。`, 'Confirm', {
+      type: 'warning',
+    })
+    await deleteRelayToken(row.id)
+    ElMessage.success('Relay token 已删除')
+    await loadRelayTokens()
   } catch (error) {
     if (!isCancel(error)) {
       ElMessage.error((error as Error).message)
@@ -571,6 +654,17 @@ const handleStatsPageSizeChange = async (size: number) => {
   statsLogPageSize.value = size
   statsLogPage.value = 1
   await loadStatsData()
+}
+
+const handleRelayPageChange = async (page: number) => {
+  relayTokenPage.value = page
+  await loadRelayTokens()
+}
+
+const handleRelayPageSizeChange = async (size: number) => {
+  relayTokenPageSize.value = size
+  relayTokenPage.value = 1
+  await loadRelayTokens()
 }
 
 onMounted(() => {
@@ -698,53 +792,59 @@ onMounted(() => {
           <div class="panel-header">
             <div>
               <h2>Relay Token</h2>
-              <p>用于 MCP 客户端访问本机中转，后端会替换为池内上游 Key。</p>
+              <p>多个 MCP 客户端可分别使用自己的 token，删除或轮换只影响对应条目。</p>
             </div>
             <div class="panel-actions">
-              <el-button type="primary" :icon="Key" @click="openRelayDialog">
-                {{ relayToken.configured ? '轮换 Token' : '生成 Token' }}
-              </el-button>
-              <el-button
-                plain
-                type="danger"
-                :disabled="!relayToken.configured"
-                @click="handleRevokeRelayToken"
-              >
-                撤销
-              </el-button>
+              <el-button type="primary" :icon="Key" @click="openCreateRelayDialog">新建 Token</el-button>
             </div>
           </div>
         </template>
 
-        <div class="relay-grid">
-          <div>
-            <p class="settings-label">状态</p>
-            <el-tag :type="relayToken.configured ? 'success' : 'warning'">
-              {{ relayToken.configured ? '已启用' : '未生成' }}
-            </el-tag>
-          </div>
-          <div>
-            <p class="settings-label">Masked Token</p>
-            <div class="copy-value-row">
-              <p class="settings-value">{{ relayToken.masked_token ?? '—' }}</p>
-              <el-button
-                :icon="CopyDocument"
-                circle
-                plain
-                :disabled="!relayToken.token"
-                title="复制完整 Token"
-                @click="copyRelayToken"
-              />
-            </div>
-          </div>
-          <div>
-            <p class="settings-label">创建时间</p>
-            <p class="settings-value">{{ formatTime(relayToken.created_at) }}</p>
-          </div>
-          <div>
-            <p class="settings-label">最近使用</p>
-            <p class="settings-value">{{ formatTime(relayToken.last_used_at) }}</p>
-          </div>
+        <el-table v-loading="loading || relayLoading" :data="relayTokens" stripe empty-text="暂无 Relay Token">
+          <el-table-column prop="name" label="名称" min-width="180" />
+          <el-table-column label="Token" min-width="240">
+            <template #default="{ row }">
+              <div class="copy-value-row key-cell">
+                <span>{{ row.masked_token }}</span>
+                <el-button
+                  :icon="CopyDocument"
+                  circle
+                  plain
+                  size="small"
+                  :disabled="!row.token"
+                  title="复制完整 Token"
+                  @click="copyRelayToken(row)"
+                />
+              </div>
+            </template>
+          </el-table-column>
+          <el-table-column label="创建时间" min-width="180">
+            <template #default="{ row }">{{ formatTime(row.created_at) }}</template>
+          </el-table-column>
+          <el-table-column label="最近使用" min-width="180">
+            <template #default="{ row }">{{ formatTime(row.last_used_at) }}</template>
+          </el-table-column>
+          <el-table-column label="操作" fixed="right" width="260">
+            <template #default="{ row }">
+              <div class="row-actions">
+                <el-button link type="primary" :icon="Edit" @click="openEditRelayDialog(row)">编辑</el-button>
+                <el-button link type="warning" :icon="RefreshRight" @click="handleRotateRelayToken(row)">轮换</el-button>
+                <el-button link type="danger" :icon="Delete" @click="handleDeleteRelayToken(row)">删除</el-button>
+              </div>
+            </template>
+          </el-table-column>
+        </el-table>
+
+        <div class="pagination-row">
+          <el-pagination
+            :current-page="relayTokenPage"
+            :page-size="relayTokenPageSize"
+            :page-sizes="[10, 20, 50, 100]"
+            layout="total, sizes, prev, pager, next, jumper"
+            :total="relayTokenTotal"
+            @update:current-page="handleRelayPageChange"
+            @update:page-size="handleRelayPageSizeChange"
+          />
         </div>
       </el-card>
 
@@ -1057,7 +1157,7 @@ onMounted(() => {
         </template>
       </el-dialog>
 
-      <el-dialog v-model="relayDialogVisible" :title="relayToken.configured ? '轮换 Relay Token' : '生成 Relay Token'" width="520px">
+      <el-dialog v-model="relayDialogVisible" :title="relayDialogTitle" width="520px">
         <el-form label-position="top">
           <el-form-item label="名称">
             <el-input v-model="relayForm.name" maxlength="64" placeholder="context7-relay" />
@@ -1067,17 +1167,17 @@ onMounted(() => {
         <template #footer>
           <el-button @click="relayDialogVisible = false">取消</el-button>
           <el-button type="primary" :loading="relaySaving" @click="submitRelayToken">
-            {{ relayToken.configured ? '轮换' : '生成' }}
+            {{ isRelayEditing ? '保存' : '新建' }}
           </el-button>
         </template>
       </el-dialog>
 
       <el-dialog v-model="relayRevealVisible" title="Relay Token" width="640px" @closed="relayTokenPlain = ''">
         <div class="token-reveal">
-          <p>完整 token 已保存，可在 Relay Token 面板继续复制。</p>
+          <p>{{ revealedRelayTokenName }} 的完整 token 已保存，可在 Relay Token 表格继续复制。</p>
           <el-input :model-value="relayTokenPlain" readonly>
             <template #append>
-              <el-button :icon="CopyDocument" @click="copyRelayToken">复制</el-button>
+              <el-button :icon="CopyDocument" @click="copyRevealedRelayToken">复制</el-button>
             </template>
           </el-input>
           <p class="mcp-arg">{{ relayMCPArgument }}</p>

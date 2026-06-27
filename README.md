@@ -79,7 +79,7 @@ Application configuration is read from environment variables. Empty values are i
 
 ## Using the Relay
 
-Configure Context7 settings and upstream API keys in the dashboard, then generate a relay bearer token from the dashboard or the admin API at `/api/admin/relay-token`.
+Configure Context7 settings and upstream API keys in the dashboard, then create one or more relay bearer tokens from the dashboard or the admin API at `/api/admin/relay-tokens`.
 
 Use the generated relay token in the `Authorization` header:
 
