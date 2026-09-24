@@ -7,6 +7,8 @@ import type {
   Context7StatsSummary,
   KeyDetail,
   KeyListResponse,
+  RelayTokenItem,
+  RelayTokenPage,
   RelayTokenResponse,
   RelayTokenView,
   RuntimeMeta,
@@ -175,6 +177,39 @@ export function updateContext7Settings(payload: Context7Settings) {
 
 export function fetchRelayToken() {
   return request<RelayTokenView>('/api/admin/relay-token')
+}
+
+export function fetchRelayTokens(params: { page: number; page_size: number }) {
+  const query = new URLSearchParams()
+  query.set('page', String(params.page))
+  query.set('page_size', String(params.page_size))
+  return request<RelayTokenPage>(`/api/admin/relay-tokens?${query.toString()}`)
+}
+
+export function createRelayToken(payload: { name: string }) {
+  return request<RelayTokenResponse>('/api/admin/relay-tokens', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  })
+}
+
+export function updateRelayToken(id: number, payload: { name: string }) {
+  return request<RelayTokenItem>(`/api/admin/relay-tokens/${id}`, {
+    method: 'PATCH',
+    body: JSON.stringify(payload),
+  })
+}
+
+export function rotateRelayToken(id: number) {
+  return request<RelayTokenResponse>(`/api/admin/relay-tokens/${id}/rotate`, {
+    method: 'POST',
+  })
+}
+
+export function deleteRelayToken(id: number) {
+  return request<void>(`/api/admin/relay-tokens/${id}`, {
+    method: 'DELETE',
+  })
 }
 
 export function generateRelayToken(payload?: { name?: string }) {

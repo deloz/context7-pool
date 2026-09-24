@@ -49,6 +49,7 @@ export interface KeyListResponse {
 
 export interface RelayTokenView {
   configured: boolean
+  id?: number
   name?: string
   token?: string
   masked_token?: string
@@ -57,9 +58,28 @@ export interface RelayTokenView {
 }
 
 export interface RelayTokenResponse {
+  id: number
+  name: string
   token: string
   masked_token: string
   created_at: string
+  last_used_at: string | null
+}
+
+export interface RelayTokenItem {
+  id: number
+  name: string
+  token: string | null
+  masked_token: string
+  created_at: string
+  last_used_at: string | null
+}
+
+export interface RelayTokenPage {
+  items: RelayTokenItem[]
+  total: number
+  page: number
+  page_size: number
 }
 
 export interface Context7StatsSummary {
