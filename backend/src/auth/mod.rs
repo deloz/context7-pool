@@ -1,10 +1,4 @@
-use std::{
-    collections::HashMap,
-    sync::{
-        Arc,
-        atomic::{AtomicI64, Ordering},
-    },
-};
+use std::{collections::HashMap, sync::Arc};
 
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use bcrypt::{DEFAULT_COST, hash, verify};
@@ -12,20 +6,18 @@ use chrono::{DateTime, Duration, Utc};
 use rand::{RngCore, rngs::OsRng};
 use sha2::{Digest, Sha256};
 use sqlx::{PgPool, Row};
-use subtle::ConstantTimeEq;
-use tokio::sync::{Mutex, RwLock};
+use tokio::sync::Mutex;
 
 use crate::{
     error::{AppError, AppResult},
     models::{
-        AdminIdentity, AdminSessionRow, AdminUserRow, RelayTokenResponse, RelayTokenRow,
-        RelayTokenView, TokenResponse,
+        AdminIdentity, AdminSessionRow, AdminUserRow, RelayTokenItem, RelayTokenPage,
+        RelayTokenResponse, RelayTokenRow, RelayTokenView, TokenResponse,
     },
 };
 
 const ADMIN_SESSION_TTL: Duration = Duration::hours(24);
 const ADMIN_SESSION_TOUCH_INTERVAL_SECONDS: i64 = 60;
-const RELAY_TOKEN_TOUCH_INTERVAL_SECONDS: i64 = 60;
 const DEFAULT_RELAY_TOKEN_NAME: &str = "context7-relay";
 const ADMIN_TOKEN_PREFIX: &str = "cpa_";
 const RELAY_TOKEN_PREFIX: &str = "cpr_";
@@ -33,29 +25,19 @@ const RELAY_TOKEN_PREFIX: &str = "cpr_";
 #[derive(Clone)]
 pub struct Service {
     pool: PgPool,
-    relay_snapshot: Arc<RwLock<RelayTokenSnapshot>>,
-    relay_touch_unix: Arc<AtomicI64>,
     admin_touch: Arc<Mutex<HashMap<i64, i64>>>,
-}
-
-#[derive(Clone, Debug, Default)]
-struct RelayTokenSnapshot {
-    id: i64,
-    token_hash: String,
 }
 
 impl Service {
     pub fn new(pool: PgPool) -> Self {
         Self {
             pool,
-            relay_snapshot: Arc::new(RwLock::new(RelayTokenSnapshot::default())),
-            relay_touch_unix: Arc::new(AtomicI64::new(0)),
             admin_touch: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
     pub async fn bootstrap(&self) -> AppResult<()> {
-        self.refresh_relay_token_snapshot().await
+        Ok(())
     }
 
     pub async fn status(&self, token: Option<&str>) -> AppResult<crate::models::AuthStatus> {
@@ -277,6 +259,7 @@ impl Service {
         let Some(item) = self.current_relay_token().await? else {
             return Ok(RelayTokenView {
                 configured: false,
+                id: None,
                 name: None,
                 token: None,
                 masked_token: None,
@@ -287,6 +270,7 @@ impl Service {
 
         Ok(RelayTokenView {
             configured: true,
+            id: Some(item.id),
             name: Some(item.name),
             token: item.token,
             masked_token: Some(item.masked_token),
@@ -295,24 +279,49 @@ impl Service {
         })
     }
 
+    pub async fn list_relay_tokens(&self, page: i64, page_size: i64) -> AppResult<RelayTokenPage> {
+        let total =
+            sqlx::query_scalar!("SELECT COUNT(*) FROM relay_tokens WHERE revoked_at IS NULL")
+                .fetch_one(&self.pool)
+                .await?
+                .unwrap_or(0);
+        let offset = page
+            .checked_sub(1)
+            .and_then(|value| value.checked_mul(page_size))
+            .ok_or_else(|| AppError::BadRequest("page is too large".to_string()))?;
+        let rows = sqlx::query_as!(
+            RelayTokenRow,
+            r#"
+            SELECT id, name, token_hash, token, masked_token, created_at, last_used_at
+            FROM relay_tokens
+            WHERE revoked_at IS NULL
+            ORDER BY created_at DESC, id DESC
+            LIMIT $1 OFFSET $2
+            "#,
+            page_size,
+            offset
+        )
+        .fetch_all(&self.pool)
+        .await?;
+
+        Ok(RelayTokenPage {
+            items: rows.into_iter().map(relay_token_item).collect(),
+            total,
+            page,
+            page_size,
+        })
+    }
+
     pub async fn generate_relay_token(&self, name: &str) -> AppResult<RelayTokenResponse> {
-        let name = name.trim();
-        let name = if name.is_empty() {
-            DEFAULT_RELAY_TOKEN_NAME
-        } else {
-            name
-        };
+        self.create_relay_token(name).await
+    }
+
+    pub async fn create_relay_token(&self, name: &str) -> AppResult<RelayTokenResponse> {
+        let name = normalize_relay_token_name(name);
         let (token, token_hash) = generate_token(RELAY_TOKEN_PREFIX)?;
         let masked_token = mask_token(&token);
         let now = Utc::now();
 
-        let mut tx = self.pool.begin().await?;
-        sqlx::query!(
-            "UPDATE relay_tokens SET revoked_at = $1 WHERE revoked_at IS NULL",
-            now
-        )
-        .execute(&mut *tx)
-        .await?;
         let row = sqlx::query_as!(
             RelayTokenRow,
             r#"
@@ -326,33 +335,114 @@ impl Service {
             masked_token,
             now
         )
+        .fetch_one(&self.pool)
+        .await?;
+
+        Ok(relay_token_response(row))
+    }
+
+    pub async fn update_relay_token(&self, id: i64, name: &str) -> AppResult<RelayTokenItem> {
+        let name = normalize_relay_token_name(name);
+        let row = sqlx::query_as!(
+            RelayTokenRow,
+            r#"
+            UPDATE relay_tokens
+            SET name = $2
+            WHERE id = $1 AND revoked_at IS NULL
+            RETURNING id, name, token_hash, token, masked_token, created_at, last_used_at
+            "#,
+            id,
+            name
+        )
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or(AppError::NotFound)?;
+
+        Ok(relay_token_item(row))
+    }
+
+    pub async fn rotate_relay_token(&self, id: i64) -> AppResult<RelayTokenResponse> {
+        let mut tx = self.pool.begin().await?;
+        let current = sqlx::query_as!(
+            RelayTokenRow,
+            r#"
+            SELECT id, name, token_hash, token, masked_token, created_at, last_used_at
+            FROM relay_tokens
+            WHERE id = $1 AND revoked_at IS NULL
+            "#,
+            id
+        )
+        .fetch_optional(&mut *tx)
+        .await?
+        .ok_or(AppError::NotFound)?;
+
+        let now = Utc::now();
+        let result = sqlx::query!(
+            "UPDATE relay_tokens SET revoked_at = $2 WHERE id = $1 AND revoked_at IS NULL",
+            id,
+            now
+        )
+        .execute(&mut *tx)
+        .await?;
+        if result.rows_affected() == 0 {
+            return Err(AppError::NotFound);
+        }
+
+        let (token, token_hash) = generate_token(RELAY_TOKEN_PREFIX)?;
+        let masked_token = mask_token(&token);
+        let row = sqlx::query_as!(
+            RelayTokenRow,
+            r#"
+            INSERT INTO relay_tokens (name, token_hash, token, masked_token, created_at)
+            VALUES ($1, $2, $3, $4, $5)
+            RETURNING id, name, token_hash, token, masked_token, created_at, last_used_at
+            "#,
+            current.name,
+            token_hash,
+            token,
+            masked_token,
+            now
+        )
         .fetch_one(&mut *tx)
         .await?;
         tx.commit().await?;
 
-        *self.relay_snapshot.write().await = RelayTokenSnapshot {
-            id: row.id,
-            token_hash: row.token_hash,
-        };
-        self.relay_touch_unix.store(0, Ordering::SeqCst);
+        Ok(relay_token_response(row))
+    }
 
-        Ok(RelayTokenResponse {
-            token: row.token.unwrap_or_default(),
-            masked_token: row.masked_token,
-            created_at: row.created_at,
-        })
+    pub async fn delete_relay_token(&self, id: i64) -> AppResult<()> {
+        let now = Utc::now();
+        let result = sqlx::query!(
+            "UPDATE relay_tokens SET revoked_at = $2 WHERE id = $1 AND revoked_at IS NULL",
+            id,
+            now
+        )
+        .execute(&self.pool)
+        .await?;
+        if result.rows_affected() == 0 {
+            return Err(AppError::NotFound);
+        }
+        Ok(())
     }
 
     pub async fn revoke_relay_token(&self) -> AppResult<()> {
         let now = Utc::now();
         sqlx::query!(
-            "UPDATE relay_tokens SET revoked_at = $1 WHERE revoked_at IS NULL",
+            r#"
+            UPDATE relay_tokens
+            SET revoked_at = $1
+            WHERE id = (
+                SELECT id
+                FROM relay_tokens
+                WHERE revoked_at IS NULL
+                ORDER BY created_at DESC, id DESC
+                LIMIT 1
+            )
+            "#,
             now
         )
         .execute(&self.pool)
         .await?;
-        *self.relay_snapshot.write().await = RelayTokenSnapshot::default();
-        self.relay_touch_unix.store(0, Ordering::SeqCst);
         Ok(())
     }
 
@@ -361,33 +451,30 @@ impl Service {
         if token.is_empty() {
             return Err(AppError::Unauthorized);
         }
-        let snapshot = self.relay_snapshot.read().await.clone();
-        if snapshot.id <= 0 || snapshot.token_hash.is_empty() {
-            return Err(AppError::Unauthorized);
-        }
-        let incoming = hash_token(token);
-        if incoming
-            .as_bytes()
-            .ct_eq(snapshot.token_hash.as_bytes())
-            .unwrap_u8()
-            != 1
-        {
-            return Err(AppError::Unauthorized);
-        }
-
+        let token_hash = hash_token(token);
         let now = Utc::now();
-        if self.should_touch_relay_token(now) {
-            let result = sqlx::query!(
-                "UPDATE relay_tokens SET last_used_at = $2 WHERE id = $1 AND revoked_at IS NULL",
-                snapshot.id,
-                now
-            )
-            .execute(&self.pool)
-            .await?;
-            if result.rows_affected() == 0 {
-                *self.relay_snapshot.write().await = RelayTokenSnapshot::default();
-                return Err(AppError::Unauthorized);
-            }
+        let row = sqlx::query!(
+            r#"
+            SELECT id
+            FROM relay_tokens
+            WHERE token_hash = $1 AND revoked_at IS NULL
+            LIMIT 1
+            "#,
+            token_hash
+        )
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or(AppError::Unauthorized)?;
+
+        let result = sqlx::query!(
+            "UPDATE relay_tokens SET last_used_at = $2 WHERE id = $1 AND revoked_at IS NULL",
+            row.id,
+            now
+        )
+        .execute(&self.pool)
+        .await?;
+        if result.rows_affected() == 0 {
+            return Err(AppError::Unauthorized);
         }
         Ok(())
     }
@@ -415,19 +502,6 @@ impl Service {
         .await?)
     }
 
-    async fn refresh_relay_token_snapshot(&self) -> AppResult<()> {
-        if let Some(item) = self.current_relay_token().await? {
-            *self.relay_snapshot.write().await = RelayTokenSnapshot {
-                id: item.id,
-                token_hash: item.token_hash,
-            };
-        } else {
-            *self.relay_snapshot.write().await = RelayTokenSnapshot::default();
-        }
-        self.relay_touch_unix.store(0, Ordering::SeqCst);
-        Ok(())
-    }
-
     async fn should_touch_admin_session(
         &self,
         session: &AdminSessionRow,
@@ -452,17 +526,6 @@ impl Service {
         }
         *previous = current;
         true
-    }
-
-    fn should_touch_relay_token(&self, now: DateTime<Utc>) -> bool {
-        let previous = self.relay_touch_unix.load(Ordering::SeqCst);
-        let current = now.timestamp();
-        if previous != 0 && current - previous < RELAY_TOKEN_TOUCH_INTERVAL_SECONDS {
-            return false;
-        }
-        self.relay_touch_unix
-            .compare_exchange(previous, current, Ordering::SeqCst, Ordering::SeqCst)
-            .is_ok()
     }
 }
 
@@ -492,6 +555,15 @@ fn validate_password(password: &str) -> AppResult<()> {
     Ok(())
 }
 
+fn normalize_relay_token_name(raw: &str) -> String {
+    let name = raw.trim();
+    if name.is_empty() {
+        DEFAULT_RELAY_TOKEN_NAME.to_string()
+    } else {
+        name.to_string()
+    }
+}
+
 fn generate_token(prefix: &str) -> AppResult<(String, String)> {
     let mut raw = [0_u8; 32];
     OsRng.fill_bytes(&mut raw);
@@ -510,5 +582,27 @@ fn mask_token(token: &str) -> String {
         "********".to_string()
     } else {
         format!("{}...{}", &token[..6], &token[token.len() - 4..])
+    }
+}
+
+fn relay_token_item(row: RelayTokenRow) -> RelayTokenItem {
+    RelayTokenItem {
+        id: row.id,
+        name: row.name,
+        token: row.token,
+        masked_token: row.masked_token,
+        created_at: row.created_at,
+        last_used_at: row.last_used_at,
+    }
+}
+
+fn relay_token_response(row: RelayTokenRow) -> RelayTokenResponse {
+    RelayTokenResponse {
+        id: row.id,
+        name: row.name,
+        token: row.token.unwrap_or_default(),
+        masked_token: row.masked_token,
+        created_at: row.created_at,
+        last_used_at: row.last_used_at,
     }
 }
