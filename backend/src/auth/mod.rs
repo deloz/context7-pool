@@ -3,7 +3,7 @@ use std::{collections::HashMap, sync::Arc};
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use bcrypt::{DEFAULT_COST, hash, verify};
 use chrono::{DateTime, Duration, Utc};
-use rand::{RngCore, rngs::OsRng};
+use rand::{TryRngCore, rngs::OsRng};
 use sha2::{Digest, Sha256};
 use sqlx::{PgPool, Row};
 use tokio::sync::Mutex;
@@ -566,7 +566,9 @@ fn normalize_relay_token_name(raw: &str) -> String {
 
 fn generate_token(prefix: &str) -> AppResult<(String, String)> {
     let mut raw = [0_u8; 32];
-    OsRng.fill_bytes(&mut raw);
+    OsRng
+        .try_fill_bytes(&mut raw)
+        .map_err(|err| AppError::Internal(format!("generate token: {err}")))?;
     let token = format!("{prefix}{}", URL_SAFE_NO_PAD.encode(raw));
     let token_hash = hash_token(&token);
     Ok((token, token_hash))
