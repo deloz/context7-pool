@@ -27,7 +27,7 @@ services:
       CONTEXTPOOL_DATABASE_URL: postgres://contextpool:contextpool@postgres:5432/contextpool
       CONTEXTPOOL_FRONTEND_DIST: /app/frontend/dist
     ports:
-      - "42431:42421"
+      - "42421:42421"
 
 volumes:
   contextpool_pg_data:
