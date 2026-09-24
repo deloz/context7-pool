@@ -43,13 +43,13 @@ docker compose up --build
 Open the dashboard:
 
 ```text
-http://127.0.0.1:42431/admin/
+http://127.0.0.1:42421/admin/
 ```
 
 Health check:
 
 ```text
-http://127.0.0.1:42431/healthz
+http://127.0.0.1:42421/healthz
 ```
 
 PostgreSQL is exposed on an uncommon local port to reduce conflicts:
@@ -58,7 +58,7 @@ PostgreSQL is exposed on an uncommon local port to reduce conflicts:
 postgres://contextpool:contextpool@127.0.0.1:45432/contextpool
 ```
 
-The Compose stack maps host port `42431` to the application port `42421`, and host port `45432` to PostgreSQL port `5432`.
+The Compose stack maps host port `42421` to the application port `42421`, and host port `45432` to PostgreSQL port `5432`.
 
 ## Configuration
 
@@ -79,7 +79,7 @@ Application configuration is read from environment variables. Empty values are i
 
 ## Using the Relay
 
-Configure Context7 settings and upstream API keys in the dashboard, then generate a relay bearer token from the dashboard or the admin API at `/api/admin/relay-token`.
+Configure Context7 settings and upstream API keys in the dashboard, then create one or more relay bearer tokens from the dashboard or the admin API at `/api/admin/relay-tokens`.
 
 Use the generated relay token in the `Authorization` header:
 
@@ -97,8 +97,8 @@ GET /relay/context7/v2/context
 For local Compose runs, call them through the application host port:
 
 ```text
-http://127.0.0.1:42431/relay/context7/v2/libs/search
-http://127.0.0.1:42431/relay/context7/v2/context
+http://127.0.0.1:42421/relay/context7/v2/libs/search
+http://127.0.0.1:42421/relay/context7/v2/context
 ```
 
 Do not use an upstream Context7 API key as the relay bearer token. The relay bearer token authenticates the client to ContextPool; ContextPool selects and injects an upstream API key from the configured pool.

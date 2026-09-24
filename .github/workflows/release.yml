@@ -13,8 +13,23 @@ jobs:
   release:
     name: Publish release
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:18-alpine
+        env:
+          POSTGRES_DB: contextpool
+          POSTGRES_USER: contextpool
+          POSTGRES_PASSWORD: contextpool
+        ports:
+          - 45432:5432
+        options: >-
+          --health-cmd "pg_isready -U contextpool -d contextpool"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 20
     env:
       CARGO_TERM_COLOR: always
+      DATABASE_URL: postgres://contextpool:contextpool@127.0.0.1:45432/contextpool
       SQLX_OFFLINE: "true"
       IMAGE_NAME: ghcr.io/deloz/context7-pool
 
@@ -68,7 +83,7 @@ jobs:
           fi
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4
 
       - name: Log in to GHCR
         uses: docker/login-action@v4
