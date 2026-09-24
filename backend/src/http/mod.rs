@@ -1,4 +1,4 @@
-use std::{collections::HashMap, path::PathBuf, sync::Arc};
+use std::{path::PathBuf, sync::Arc};
 
 use axum::{
     Json, Router,
@@ -55,6 +55,14 @@ pub fn router(state: AppState) -> Router {
         .route("/api/admin/keys/{id}", patch(update_key))
         .route("/api/admin/keys/{id}", delete(delete_key))
         .route("/api/admin/keys/{id}/reset-health", post(reset_key_health))
+        .route("/api/admin/relay-tokens", get(list_relay_tokens))
+        .route("/api/admin/relay-tokens", post(create_relay_token))
+        .route("/api/admin/relay-tokens/{id}", patch(update_relay_token))
+        .route("/api/admin/relay-tokens/{id}", delete(delete_relay_token))
+        .route(
+            "/api/admin/relay-tokens/{id}/rotate",
+            post(rotate_relay_token),
+        )
         .route("/api/admin/relay-token", get(get_relay_token))
         .route("/api/admin/relay-token", post(generate_relay_token))
         .route("/api/admin/relay-token", delete(revoke_relay_token))
@@ -333,16 +341,78 @@ async fn get_relay_token(
     Ok(Json(state.auth.get_relay_token().await?))
 }
 
+#[derive(Deserialize)]
+struct RelayTokenParams {
+    page: Option<i64>,
+    page_size: Option<i64>,
+}
+
+async fn list_relay_tokens(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(params): Query<RelayTokenParams>,
+) -> AppResult<Json<crate::models::RelayTokenPage>> {
+    require_admin(&state, &headers).await?;
+    let (page, page_size) = relay_token_pagination(params)?;
+    Ok(Json(state.auth.list_relay_tokens(page, page_size).await?))
+}
+
+async fn create_relay_token(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(input): Json<crate::models::CreateRelayTokenInput>,
+) -> AppResult<(StatusCode, Json<crate::models::RelayTokenResponse>)> {
+    require_admin(&state, &headers).await?;
+    Ok((
+        StatusCode::CREATED,
+        Json(state.auth.create_relay_token(&input.name).await?),
+    ))
+}
+
+async fn update_relay_token(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+    Json(input): Json<crate::models::UpdateRelayTokenInput>,
+) -> AppResult<Json<crate::models::RelayTokenItem>> {
+    require_admin(&state, &headers).await?;
+    validate_positive_id(id)?;
+    if input.name.trim().is_empty() {
+        return Err(AppError::BadRequest("name cannot be empty".to_string()));
+    }
+    Ok(Json(state.auth.update_relay_token(id, &input.name).await?))
+}
+
+async fn rotate_relay_token(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+) -> AppResult<Json<crate::models::RelayTokenResponse>> {
+    require_admin(&state, &headers).await?;
+    validate_positive_id(id)?;
+    Ok(Json(state.auth.rotate_relay_token(id).await?))
+}
+
+async fn delete_relay_token(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(id): Path<i64>,
+) -> AppResult<StatusCode> {
+    require_admin(&state, &headers).await?;
+    validate_positive_id(id)?;
+    state.auth.delete_relay_token(id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
 async fn generate_relay_token(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
-    body: Option<Json<HashMap<String, String>>>,
+    body: Option<Json<crate::models::CreateRelayTokenInput>>,
 ) -> AppResult<(StatusCode, Json<crate::models::RelayTokenResponse>)> {
     require_admin(&state, &headers).await?;
     let name = body
         .as_ref()
-        .and_then(|payload| payload.get("name"))
-        .map(String::as_str)
+        .map(|payload| payload.name.as_str())
         .unwrap_or("");
     Ok((
         StatusCode::CREATED,
@@ -446,6 +516,27 @@ async fn require_admin(
     )
     .ok_or(AppError::Unauthorized)?;
     state.auth.validate_admin_token(&token).await
+}
+
+fn relay_token_pagination(params: RelayTokenParams) -> AppResult<(i64, i64)> {
+    let page = params.page.unwrap_or(1);
+    let page_size = params.page_size.unwrap_or(10);
+    if page < 1 {
+        return Err(AppError::BadRequest("page must be at least 1".to_string()));
+    }
+    if !(1..=100).contains(&page_size) {
+        return Err(AppError::BadRequest(
+            "page_size must be between 1 and 100".to_string(),
+        ));
+    }
+    Ok((page, page_size))
+}
+
+fn validate_positive_id(id: i64) -> AppResult<()> {
+    if id <= 0 {
+        return Err(AppError::BadRequest("id must be positive".to_string()));
+    }
+    Ok(())
 }
 
 fn content_type_for(path: &std::path::Path) -> &'static str {
