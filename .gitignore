@@ -1,12 +1,22 @@
+# Local agent instructions
+AGENTS.md
+
+# Local database files and backups
 backend/contextpool
 backend/contextpool.db
 backend/contextpool.db-*
 backend/*.db.*.bak
+
+# Rust build output
 backend/target/
 backend/coverage.out
 backend/.cache/
+
+# Python cache files
 **/__pycache__/
 **/*.py[cod]
+
+# Frontend dependencies and build output
 frontend/node_modules/
 frontend/dist/
 frontend/.vite/

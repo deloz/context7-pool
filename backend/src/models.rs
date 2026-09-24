@@ -115,6 +115,8 @@ pub struct AdminIdentity {
 pub struct RelayTokenView {
     pub configured: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub id: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub token: Option<String>,
@@ -128,9 +130,40 @@ pub struct RelayTokenView {
 
 #[derive(Debug, Serialize)]
 pub struct RelayTokenResponse {
+    pub id: i64,
+    pub name: String,
     pub token: String,
     pub masked_token: String,
     pub created_at: DateTime<Utc>,
+    pub last_used_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RelayTokenItem {
+    pub id: i64,
+    pub name: String,
+    pub token: Option<String>,
+    pub masked_token: String,
+    pub created_at: DateTime<Utc>,
+    pub last_used_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RelayTokenPage {
+    pub items: Vec<RelayTokenItem>,
+    pub total: i64,
+    pub page: i64,
+    pub page_size: i64,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CreateRelayTokenInput {
+    pub name: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UpdateRelayTokenInput {
+    pub name: String,
 }
 
 #[derive(Clone, Debug)]

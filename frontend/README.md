@@ -1,5 +1,13 @@
-# Vue 3 + TypeScript + Vite
+# ContextPool Admin Frontend
 
-This template should help get you started developing with Vue 3 and TypeScript in Vite. The template uses Vue 3 `<script setup>` SFCs, check out the [script setup docs](https://v3.vuejs.org/api/sfc-script-setup.html#sfc-script-setup) to learn more.
+Vue 3 admin UI for ContextPool, built with Vite, TypeScript, and Element Plus.
 
-Learn more about the recommended Project Setup and IDE Support in the [Vue Docs TypeScript Guide](https://vuejs.org/guide/typescript/overview.html#project-setup).
+The Vite config serves the app under `/admin/`. The dev server listens on port `42422` and proxies `/api` to `http://127.0.0.1:42421`.
+
+```bash
+npm ci
+npm run dev
+npm run build
+```
+
+See the root `README.md` for the full Docker, backend, and PostgreSQL workflow.
