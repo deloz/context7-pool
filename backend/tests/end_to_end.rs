@@ -1,4 +1,5 @@
 use axum::{
+    Router,
     body::{Body, to_bytes},
     http::{Method, Request, StatusCode, header},
 };
@@ -66,6 +67,10 @@ async fn admin_stats_and_relay_routes_work() {
         stats_service.clone(),
     );
     admin_service.bootstrap().await.unwrap();
+    settings_service
+        .update_context7("http://127.0.0.1:1/api")
+        .await
+        .unwrap();
     let proxy_service =
         proxy::Service::new(manager, settings_service, stats_service.clone(), None).unwrap();
 
@@ -174,35 +179,188 @@ async fn admin_stats_and_relay_routes_work() {
     assert_eq!(summary["total_requests"], 1);
     assert_eq!(summary["failed_requests"], 1);
 
-    let response = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method(Method::POST)
-                .uri("/api/admin/relay-token")
-                .header(header::AUTHORIZATION, format!("Bearer {admin_token}"))
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::CREATED);
-    let relay = json_body(response).await;
-    let relay_token = relay["token"].as_str().unwrap();
+    let (status, first_relay) = admin_json(
+        app.clone(),
+        Method::POST,
+        "/api/admin/relay-tokens",
+        &admin_token,
+        Some(r#"{"name":"mcp-client-a"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let first_relay_id = first_relay["id"].as_i64().unwrap();
+    let first_relay_token = first_relay["token"].as_str().unwrap().to_string();
 
-    let response = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method(Method::GET)
-                .uri("/relay/context7/v2/context")
-                .header(header::AUTHORIZATION, format!("Bearer {relay_token}"))
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let (status, second_relay) = admin_json(
+        app.clone(),
+        Method::POST,
+        "/api/admin/relay-tokens",
+        &admin_token,
+        Some(r#"{"name":"mcp-client-b"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let second_relay_id = second_relay["id"].as_i64().unwrap();
+    let second_relay_token = second_relay["token"].as_str().unwrap().to_string();
+
+    let (status, relay_page) = admin_json(
+        app.clone(),
+        Method::GET,
+        "/api/admin/relay-tokens?page=1&page_size=10",
+        &admin_token,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(relay_page["total"], 2);
+    assert_eq!(relay_page["page"], 1);
+    assert_eq!(relay_page["page_size"], 10);
+    assert_eq!(relay_page["items"].as_array().unwrap().len(), 2);
+
+    let (status, relay_page) = admin_json(
+        app.clone(),
+        Method::GET,
+        "/api/admin/relay-tokens?page=1&page_size=1",
+        &admin_token,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(relay_page["total"], 2);
+    assert_eq!(relay_page["page"], 1);
+    assert_eq!(relay_page["page_size"], 1);
+    assert_eq!(relay_page["items"].as_array().unwrap().len(), 1);
+
+    assert_eq!(
+        relay_status(app.clone(), &first_relay_token).await,
+        StatusCode::SERVICE_UNAVAILABLE
+    );
+    assert_eq!(
+        relay_status(app.clone(), &second_relay_token).await,
+        StatusCode::SERVICE_UNAVAILABLE
+    );
+
+    let (status, rotated_relay) = admin_json(
+        app.clone(),
+        Method::POST,
+        &format!("/api/admin/relay-tokens/{first_relay_id}/rotate"),
+        &admin_token,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let rotated_relay_id = rotated_relay["id"].as_i64().unwrap();
+    let rotated_relay_token = rotated_relay["token"].as_str().unwrap().to_string();
+    assert_ne!(rotated_relay_id, first_relay_id);
+    assert_eq!(
+        relay_status(app.clone(), &first_relay_token).await,
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        relay_status(app.clone(), &rotated_relay_token).await,
+        StatusCode::SERVICE_UNAVAILABLE
+    );
+    assert_eq!(
+        relay_status(app.clone(), &second_relay_token).await,
+        StatusCode::SERVICE_UNAVAILABLE
+    );
+
+    let (status, relay_page) = admin_json(
+        app.clone(),
+        Method::GET,
+        "/api/admin/relay-tokens?page=1&page_size=10",
+        &admin_token,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(relay_page["total"], 2);
+    assert!(
+        !relay_page["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item["id"] == first_relay_id)
+    );
+
+    let status = admin_status(
+        app.clone(),
+        Method::DELETE,
+        &format!("/api/admin/relay-tokens/{second_relay_id}"),
+        &admin_token,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    assert_eq!(
+        relay_status(app.clone(), &second_relay_token).await,
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        relay_status(app.clone(), &rotated_relay_token).await,
+        StatusCode::SERVICE_UNAVAILABLE
+    );
+
+    let (status, updated_relay) = admin_json(
+        app.clone(),
+        Method::PATCH,
+        &format!("/api/admin/relay-tokens/{rotated_relay_id}"),
+        &admin_token,
+        Some(r#"{"name":"renamed-client-a"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(updated_relay["name"], "renamed-client-a");
+
+    let (status, relay_page) = admin_json(
+        app.clone(),
+        Method::GET,
+        "/api/admin/relay-tokens?page=1&page_size=10",
+        &admin_token,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(relay_page["total"], 1);
+    assert_eq!(relay_page["items"][0]["id"], rotated_relay_id);
+    assert_eq!(relay_page["items"][0]["name"], "renamed-client-a");
+
+    let (status, legacy_relay) = admin_json(
+        app.clone(),
+        Method::POST,
+        "/api/admin/relay-token",
+        &admin_token,
+        Some(r#"{"name":"legacy-compatible"}"#),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let legacy_relay_token = legacy_relay["token"].as_str().unwrap().to_string();
+    assert_eq!(
+        relay_status(app.clone(), &legacy_relay_token).await,
+        StatusCode::SERVICE_UNAVAILABLE
+    );
+    assert_eq!(
+        relay_status(app.clone(), &rotated_relay_token).await,
+        StatusCode::SERVICE_UNAVAILABLE
+    );
+
+    let status = admin_status(
+        app.clone(),
+        Method::DELETE,
+        "/api/admin/relay-token",
+        &admin_token,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    assert_eq!(
+        relay_status(app.clone(), &legacy_relay_token).await,
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        relay_status(app.clone(), &rotated_relay_token).await,
+        StatusCode::SERVICE_UNAVAILABLE
+    );
 
     let response = app
         .oneshot(
@@ -219,6 +377,67 @@ async fn admin_stats_and_relay_routes_work() {
             .unwrap()
             .contains("admin")
     );
+}
+
+async fn admin_json(
+    app: Router,
+    method: Method,
+    uri: &str,
+    admin_token: &str,
+    body: Option<&str>,
+) -> (StatusCode, Value) {
+    let response = admin_request(app, method, uri, admin_token, body).await;
+    let status = response.status();
+    (status, json_body(response).await)
+}
+
+async fn admin_status(
+    app: Router,
+    method: Method,
+    uri: &str,
+    admin_token: &str,
+    body: Option<&str>,
+) -> StatusCode {
+    admin_request(app, method, uri, admin_token, body)
+        .await
+        .status()
+}
+
+async fn admin_request(
+    app: Router,
+    method: Method,
+    uri: &str,
+    admin_token: &str,
+    body: Option<&str>,
+) -> axum::response::Response {
+    let mut builder = Request::builder()
+        .method(method)
+        .uri(uri)
+        .header(header::AUTHORIZATION, format!("Bearer {admin_token}"));
+    if body.is_some() {
+        builder = builder.header(header::CONTENT_TYPE, "application/json");
+    }
+    app.oneshot(
+        builder
+            .body(Body::from(body.unwrap_or_default().to_string()))
+            .unwrap(),
+    )
+    .await
+    .unwrap()
+}
+
+async fn relay_status(app: Router, relay_token: &str) -> StatusCode {
+    app.oneshot(
+        Request::builder()
+            .method(Method::GET)
+            .uri("/relay/context7/v2/context")
+            .header(header::AUTHORIZATION, format!("Bearer {relay_token}"))
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await
+    .unwrap()
+    .status()
 }
 
 async fn json_body(response: axum::response::Response) -> Value {
