@@ -2,66 +2,27 @@ name: CI
 
 on:
   pull_request:
-  push:
-    branches:
-      - main
 
 permissions:
   contents: read
 
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   ci:
-    name: Build and test
+    name: Test
+    uses: ./.github/workflows/test.yml
+
+  docker:
+    name: Docker build
+    needs: ci
     runs-on: ubuntu-latest
-    services:
-      postgres:
-        image: postgres:18-alpine
-        env:
-          POSTGRES_DB: contextpool
-          POSTGRES_USER: contextpool
-          POSTGRES_PASSWORD: contextpool
-        ports:
-          - 45432:5432
-        options: >-
-          --health-cmd "pg_isready -U contextpool -d contextpool"
-          --health-interval 5s
-          --health-timeout 3s
-          --health-retries 20
-    env:
-      CARGO_TERM_COLOR: always
-      DATABASE_URL: postgres://contextpool:contextpool@127.0.0.1:45432/contextpool
-      SQLX_OFFLINE: "true"
 
     steps:
       - name: Checkout
         uses: actions/checkout@v7
 
-      - name: Set up Node.js
-        uses: actions/setup-node@v7
-        with:
-          node-version: "24"
-          cache: npm
-          cache-dependency-path: frontend/package-lock.json
-
-      - name: Show Rust toolchain
-        run: rustup show
-
-      - name: Check Rust formatting
-        run: cargo fmt --manifest-path backend/Cargo.toml --check
-
-      - name: Run Rust clippy
-        run: cargo clippy --manifest-path backend/Cargo.toml --locked -- -D warnings
-
-      - name: Run Rust tests
-        run: cargo test --manifest-path backend/Cargo.toml --locked
-
-      - name: Install frontend dependencies
-        working-directory: frontend
-        run: npm ci
-
-      - name: Build frontend
-        working-directory: frontend
-        run: npm run build
-
       - name: Build Docker image
-        run: docker build .
+        run: docker build --pull --tag context7-pool:ci .
