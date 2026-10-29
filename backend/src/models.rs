@@ -1,48 +1,5 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use sqlx::FromRow;
-
-#[derive(Clone, Debug, FromRow)]
-pub struct ApiKeyRow {
-    pub id: i64,
-    pub name: String,
-    pub api_key: String,
-    pub enabled: bool,
-    pub health_status: String,
-    pub failure_streak: i32,
-    pub cooldown_until: Option<DateTime<Utc>>,
-    pub last_error: Option<String>,
-    pub last_status_code: Option<i32>,
-    pub last_success_at: Option<DateTime<Utc>>,
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
-}
-
-#[derive(Debug, FromRow)]
-pub struct AdminUserRow {
-    pub id: i64,
-    pub username: String,
-    pub password_hash: String,
-}
-
-#[derive(Debug, FromRow)]
-pub struct AdminSessionRow {
-    pub id: i64,
-    pub admin_user_id: i64,
-    pub expires_at: DateTime<Utc>,
-    pub last_used_at: Option<DateTime<Utc>>,
-}
-
-#[derive(Debug, FromRow)]
-pub struct RelayTokenRow {
-    pub id: i64,
-    pub name: String,
-    pub token_hash: String,
-    pub token: Option<String>,
-    pub masked_token: String,
-    pub created_at: DateTime<Utc>,
-    pub last_used_at: Option<DateTime<Utc>>,
-}
 
 #[derive(Clone, Debug, Serialize)]
 pub struct RuntimeMeta {

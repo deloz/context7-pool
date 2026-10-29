@@ -27,7 +27,6 @@ jobs:
     env:
       CARGO_TERM_COLOR: always
       DATABASE_URL: postgres://contextpool:contextpool@127.0.0.1:45432/contextpool
-      SQLX_OFFLINE: "true"
 
     steps:
       - name: Checkout

@@ -2,11 +2,18 @@ use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use chrono::{DateTime, Timelike, Utc};
 use rust_decimal::{Decimal, prelude::ToPrimitive};
+use sea_orm::sea_query::{Expr, Func, OnConflict};
+use sea_orm::{
+    ActiveModelTrait, ColumnTrait, Condition, DatabaseConnection, EntityTrait, PaginatorTrait,
+    QueryFilter, QueryOrder, QuerySelect, Set, TransactionTrait,
+};
 use serde::{Deserialize, Serialize};
-use sqlx::{PgPool, QueryBuilder, Row};
 use tokio::sync::Mutex;
 
-use crate::error::AppResult;
+use crate::{
+    entity::{minute_stat, request_log},
+    error::AppResult,
+};
 
 const DEFAULT_FLUSH_INTERVAL: Duration = Duration::from_millis(500);
 const DEFAULT_BATCH_SIZE: usize = 128;
@@ -24,7 +31,7 @@ pub struct Config {
 
 #[derive(Clone)]
 pub struct Service {
-    pool: PgPool,
+    db: DatabaseConnection,
     flush_interval: Duration,
     batch_size: usize,
     queue_tx: tokio::sync::mpsc::Sender<Event>,
@@ -159,7 +166,7 @@ struct MinuteAggregate {
 }
 
 impl Service {
-    pub fn new(pool: PgPool, cfg: Config) -> Self {
+    pub fn new(db: DatabaseConnection, cfg: Config) -> Self {
         let flush_interval = if cfg.flush_interval.is_zero() {
             DEFAULT_FLUSH_INTERVAL
         } else {
@@ -177,7 +184,7 @@ impl Service {
         };
         let (queue_tx, queue_rx) = tokio::sync::mpsc::channel(queue_size);
         Self {
-            pool,
+            db,
             flush_interval,
             batch_size,
             queue_tx,
@@ -241,34 +248,124 @@ impl Service {
     }
 
     pub async fn summary(&self) -> AppResult<Summary> {
-        let row = sqlx::query(
-            r#"
-            SELECT
-                COALESCE(SUM(total_requests), 0)::BIGINT AS total_requests,
-                COALESCE(SUM(success_requests), 0)::BIGINT AS success_requests,
-                COALESCE(SUM(failed_requests), 0)::BIGINT AS failed_requests,
-                COALESCE(SUM(network_errors), 0)::BIGINT AS network_errors,
-                COALESCE(SUM(status_2xx), 0)::BIGINT AS status_2xx,
-                COALESCE(SUM(status_4xx), 0)::BIGINT AS status_4xx,
-                COALESCE(SUM(status_5xx), 0)::BIGINT AS status_5xx,
-                COALESCE(SUM(total_latency_ms), 0)::BIGINT AS total_latency_ms,
-                COALESCE(MAX(max_latency_ms), 0)::BIGINT AS max_latency_ms
-            FROM context7_minute_stats
-            "#,
-        )
-        .fetch_one(&self.pool)
-        .await?;
+        let totals = minute_stat::Entity::find()
+            .select_only()
+            .column_as(
+                Expr::FunctionCall(Func::cast_as(
+                    Func::coalesce([
+                        Func::sum(Expr::col(minute_stat::Column::TotalRequests)).into(),
+                        Expr::value(0),
+                    ]),
+                    "BIGINT",
+                )),
+                "total_requests",
+            )
+            .column_as(
+                Expr::FunctionCall(Func::cast_as(
+                    Func::coalesce([
+                        Func::sum(Expr::col(minute_stat::Column::SuccessRequests)).into(),
+                        Expr::value(0),
+                    ]),
+                    "BIGINT",
+                )),
+                "success_requests",
+            )
+            .column_as(
+                Expr::FunctionCall(Func::cast_as(
+                    Func::coalesce([
+                        Func::sum(Expr::col(minute_stat::Column::FailedRequests)).into(),
+                        Expr::value(0),
+                    ]),
+                    "BIGINT",
+                )),
+                "failed_requests",
+            )
+            .column_as(
+                Expr::FunctionCall(Func::cast_as(
+                    Func::coalesce([
+                        Func::sum(Expr::col(minute_stat::Column::NetworkErrors)).into(),
+                        Expr::value(0),
+                    ]),
+                    "BIGINT",
+                )),
+                "network_errors",
+            )
+            .column_as(
+                Expr::FunctionCall(Func::cast_as(
+                    Func::coalesce([
+                        Func::sum(Expr::col(minute_stat::Column::Status2xx)).into(),
+                        Expr::value(0),
+                    ]),
+                    "BIGINT",
+                )),
+                "status_2xx",
+            )
+            .column_as(
+                Expr::FunctionCall(Func::cast_as(
+                    Func::coalesce([
+                        Func::sum(Expr::col(minute_stat::Column::Status4xx)).into(),
+                        Expr::value(0),
+                    ]),
+                    "BIGINT",
+                )),
+                "status_4xx",
+            )
+            .column_as(
+                Expr::FunctionCall(Func::cast_as(
+                    Func::coalesce([
+                        Func::sum(Expr::col(minute_stat::Column::Status5xx)).into(),
+                        Expr::value(0),
+                    ]),
+                    "BIGINT",
+                )),
+                "status_5xx",
+            )
+            .column_as(
+                Expr::FunctionCall(Func::cast_as(
+                    Func::coalesce([
+                        Func::sum(Expr::col(minute_stat::Column::TotalLatencyMs)).into(),
+                        Expr::value(0),
+                    ]),
+                    "BIGINT",
+                )),
+                "total_latency_ms",
+            )
+            .column_as(
+                Expr::FunctionCall(Func::cast_as(
+                    Func::coalesce([
+                        Func::max(Expr::col(minute_stat::Column::MaxLatencyMs)).into(),
+                        Expr::value(0),
+                    ]),
+                    "BIGINT",
+                )),
+                "max_latency_ms",
+            )
+            .into_tuple::<(i64, i64, i64, i64, i64, i64, i64, i64, i64)>()
+            .one(&self.db)
+            .await?;
+
+        let (
+            total_requests,
+            success_requests,
+            failed_requests,
+            network_errors,
+            status_2xx,
+            status_4xx,
+            status_5xx,
+            total_latency_ms,
+            max_latency_ms,
+        ) = totals.unwrap_or_default();
 
         let mut summary = Summary {
-            total_requests: row.try_get("total_requests")?,
-            success_requests: row.try_get("success_requests")?,
-            failed_requests: row.try_get("failed_requests")?,
-            network_errors: row.try_get("network_errors")?,
-            status_2xx: row.try_get("status_2xx")?,
-            status_4xx: row.try_get("status_4xx")?,
-            status_5xx: row.try_get("status_5xx")?,
-            total_latency_ms: row.try_get("total_latency_ms")?,
-            max_latency_ms: row.try_get("max_latency_ms")?,
+            total_requests,
+            success_requests,
+            failed_requests,
+            network_errors,
+            status_2xx,
+            status_4xx,
+            status_5xx,
+            total_latency_ms,
+            max_latency_ms,
             ..Summary::default()
         };
         if summary.total_requests > 0 {
@@ -277,135 +374,66 @@ impl Service {
                 ratio_decimal(summary.total_latency_ms, summary.total_requests);
         }
 
-        if let Some(last) = sqlx::query(
-            r#"
-            SELECT finished_at, status_code, error
-            FROM context7_request_logs
-            ORDER BY finished_at DESC, id DESC
-            LIMIT 1
-            "#,
-        )
-        .fetch_optional(&self.pool)
-        .await?
+        if let Some(last) = request_log::Entity::find()
+            .order_by_desc(request_log::Column::FinishedAt)
+            .order_by_desc(request_log::Column::Id)
+            .one(&self.db)
+            .await?
         {
-            summary.last_request_at = Some(last.try_get("finished_at")?);
-            summary.last_status_code = last.try_get("status_code")?;
-            summary.last_error = last.try_get("error")?;
+            summary.last_request_at = Some(last.finished_at);
+            summary.last_status_code = last.status_code;
+            summary.last_error = last.error;
         }
 
         Ok(summary)
     }
 
     pub async fn list_minutes(&self, params: MinuteQuery) -> AppResult<Vec<MinuteItem>> {
-        let mut builder = QueryBuilder::new(
-            r#"
-            SELECT api_key_id, api_key_name, minute_at, total_requests, success_requests,
-                   failed_requests, status_2xx, status_4xx, status_5xx, network_errors,
-                   total_latency_ms, max_latency_ms, last_status_code, last_error, updated_at
-            FROM context7_minute_stats
-            WHERE TRUE
-            "#,
-        );
+        let mut condition = Condition::all();
         if let Some(from) = params.from {
-            builder.push(" AND minute_at >= ").push_bind(from);
+            condition = condition.add(minute_stat::Column::MinuteAt.gte(from));
         }
         if let Some(to) = params.to {
-            builder.push(" AND minute_at <= ").push_bind(to);
+            condition = condition.add(minute_stat::Column::MinuteAt.lte(to));
         }
         if let Some(api_key_id) = params.api_key_id {
-            builder.push(" AND api_key_id = ").push_bind(api_key_id);
+            condition = condition.add(minute_stat::Column::ApiKeyId.eq(api_key_id));
         }
-        builder.push(" ORDER BY minute_at ASC, api_key_id ASC");
 
-        let rows = builder.build().fetch_all(&self.pool).await?;
-        let mut items = Vec::with_capacity(rows.len());
-        for row in rows {
-            let total_requests = i64::from(row.try_get::<i32, _>("total_requests")?);
-            let success_requests = i64::from(row.try_get::<i32, _>("success_requests")?);
-            let total_latency_ms = row.try_get::<i64, _>("total_latency_ms")?;
-            items.push(MinuteItem {
-                api_key_id: row.try_get("api_key_id")?,
-                api_key_name: row.try_get("api_key_name")?,
-                minute_at: row.try_get("minute_at")?,
-                total_requests,
-                success_requests,
-                failed_requests: i64::from(row.try_get::<i32, _>("failed_requests")?),
-                status_2xx: i64::from(row.try_get::<i32, _>("status_2xx")?),
-                status_4xx: i64::from(row.try_get::<i32, _>("status_4xx")?),
-                status_5xx: i64::from(row.try_get::<i32, _>("status_5xx")?),
-                network_errors: i64::from(row.try_get::<i32, _>("network_errors")?),
-                total_latency_ms,
-                max_latency_ms: row.try_get("max_latency_ms")?,
-                last_status_code: row.try_get("last_status_code")?,
-                last_error: row.try_get("last_error")?,
-                updated_at: row.try_get("updated_at")?,
-                success_rate: ratio_decimal(success_requests, total_requests),
-                average_latency_ms: ratio_decimal(total_latency_ms, total_requests),
-            });
-        }
-        Ok(items)
+        let rows = minute_stat::Entity::find()
+            .filter(condition)
+            .order_by_asc(minute_stat::Column::MinuteAt)
+            .order_by_asc(minute_stat::Column::ApiKeyId)
+            .all(&self.db)
+            .await?;
+
+        Ok(rows.into_iter().map(minute_item).collect())
     }
 
     pub async fn list_logs(&self, params: LogQuery) -> AppResult<LogPage> {
-        let page = params.page.unwrap_or(1).max(1);
+        let page = std::cmp::max(params.page.unwrap_or(1), 1);
         let page_size = params
             .page_size
             .unwrap_or(DEFAULT_LOG_PAGE_SIZE)
             .clamp(1, MAX_LOG_PAGE_SIZE);
 
-        let mut count_builder = QueryBuilder::new(
-            "SELECT COUNT(*)::BIGINT AS total FROM context7_request_logs WHERE TRUE",
-        );
-        push_log_filters(&mut count_builder, &params);
-        let total: i64 = count_builder
-            .build()
-            .fetch_one(&self.pool)
-            .await?
-            .try_get("total")?;
+        let condition = log_filters(&params);
+        let total = request_log::Entity::find()
+            .filter(condition.clone())
+            .count(&self.db)
+            .await? as i64;
 
-        let mut builder = QueryBuilder::new(
-            r#"
-            SELECT id, api_key_id, api_key_name, method, path, query, status_code, success,
-                   latency_ms, error, client_ip, user_agent, client_source, client_ide,
-                   client_version, transport, started_at, finished_at
-            FROM context7_request_logs
-            WHERE TRUE
-            "#,
-        );
-        push_log_filters(&mut builder, &params);
-        builder
-            .push(" ORDER BY started_at DESC, id DESC LIMIT ")
-            .push_bind(page_size)
-            .push(" OFFSET ")
-            .push_bind((page - 1) * page_size);
-
-        let rows = builder.build().fetch_all(&self.pool).await?;
-        let mut items = Vec::with_capacity(rows.len());
-        for row in rows {
-            items.push(LogItem {
-                id: row.try_get("id")?,
-                api_key_id: row.try_get("api_key_id")?,
-                api_key_name: row.try_get("api_key_name")?,
-                method: row.try_get("method")?,
-                path: row.try_get("path")?,
-                query: row.try_get("query")?,
-                status_code: row.try_get("status_code")?,
-                success: row.try_get("success")?,
-                latency_ms: row.try_get("latency_ms")?,
-                error: row.try_get("error")?,
-                client_ip: row.try_get("client_ip")?,
-                user_agent: row.try_get("user_agent")?,
-                client_source: row.try_get("client_source")?,
-                client_ide: row.try_get("client_ide")?,
-                client_version: row.try_get("client_version")?,
-                transport: row.try_get("transport")?,
-                started_at: row.try_get("started_at")?,
-                finished_at: row.try_get("finished_at")?,
-            });
-        }
+        let rows = request_log::Entity::find()
+            .filter(condition)
+            .order_by_desc(request_log::Column::StartedAt)
+            .order_by_desc(request_log::Column::Id)
+            .offset(((page - 1) * page_size) as u64)
+            .limit(page_size as u64)
+            .all(&self.db)
+            .await?;
 
         Ok(LogPage {
-            items,
+            items: rows.into_iter().map(log_item).collect(),
             total,
             page,
             page_size,
@@ -426,91 +454,103 @@ impl Service {
     }
 
     async fn write_batch(&self, batch: &[Event]) -> AppResult<()> {
-        let mut tx = self.pool.begin().await?;
+        let tx = self.db.begin().await?;
         for event in batch {
-            let error = optional_string(&event.error);
-            let client_ip = optional_string(&event.client_ip);
-            let user_agent = optional_string(&event.user_agent);
-            let client_source = optional_string(&event.client_source);
-            let client_ide = optional_string(&event.client_ide);
-            let client_version = optional_string(&event.client_version);
-            let transport = optional_string(&event.transport);
-            sqlx::query!(
-                r#"
-                INSERT INTO context7_request_logs
-                    (api_key_id, api_key_name, method, path, query, status_code, success,
-                     latency_ms, error, client_ip, user_agent, client_source, client_ide,
-                     client_version, transport, started_at, finished_at)
-                VALUES
-                    ($1, $2, $3, $4, $5, $6, $7,
-                     $8, $9, $10, $11, $12, $13,
-                     $14, $15, $16, $17)
-                "#,
-                event.api_key_id,
-                event.api_key_name,
-                event.method,
-                event.path,
-                event.query,
-                event.status_code,
-                event.success,
-                event.latency_ms,
-                error,
-                client_ip,
-                user_agent,
-                client_source,
-                client_ide,
-                client_version,
-                transport,
-                event.started_at,
-                event.finished_at
-            )
-            .execute(&mut *tx)
+            request_log::ActiveModel {
+                api_key_id: Set(event.api_key_id),
+                api_key_name: Set(event.api_key_name.clone()),
+                method: Set(event.method.clone()),
+                path: Set(event.path.clone()),
+                query: Set(event.query.clone()),
+                status_code: Set(event.status_code),
+                success: Set(event.success),
+                latency_ms: Set(event.latency_ms),
+                error: Set(optional_string(&event.error)),
+                client_ip: Set(optional_string(&event.client_ip)),
+                user_agent: Set(optional_string(&event.user_agent)),
+                client_source: Set(optional_string(&event.client_source)),
+                client_ide: Set(optional_string(&event.client_ide)),
+                client_version: Set(optional_string(&event.client_version)),
+                transport: Set(optional_string(&event.transport)),
+                started_at: Set(event.started_at),
+                finished_at: Set(event.finished_at),
+                ..Default::default()
+            }
+            .insert(&tx)
             .await?;
         }
 
         for item in aggregate_events(batch) {
-            sqlx::query!(
-                r#"
-                INSERT INTO context7_minute_stats
-                    (api_key_id, api_key_name, minute_at, total_requests, success_requests,
-                     failed_requests, status_2xx, status_4xx, status_5xx, network_errors,
-                     total_latency_ms, max_latency_ms, last_status_code, last_error, updated_at)
-                VALUES
-                    ($1, $2, $3, $4, $5,
-                     $6, $7, $8, $9, $10,
-                     $11, $12, $13, $14, $15)
-                ON CONFLICT (api_key_id, minute_at) DO UPDATE
-                SET api_key_name = EXCLUDED.api_key_name,
-                    total_requests = COALESCE(context7_minute_stats.total_requests, 0) + COALESCE(EXCLUDED.total_requests, 0),
-                    success_requests = COALESCE(context7_minute_stats.success_requests, 0) + COALESCE(EXCLUDED.success_requests, 0),
-                    failed_requests = COALESCE(context7_minute_stats.failed_requests, 0) + COALESCE(EXCLUDED.failed_requests, 0),
-                    status_2xx = COALESCE(context7_minute_stats.status_2xx, 0) + COALESCE(EXCLUDED.status_2xx, 0),
-                    status_4xx = COALESCE(context7_minute_stats.status_4xx, 0) + COALESCE(EXCLUDED.status_4xx, 0),
-                    status_5xx = COALESCE(context7_minute_stats.status_5xx, 0) + COALESCE(EXCLUDED.status_5xx, 0),
-                    network_errors = COALESCE(context7_minute_stats.network_errors, 0) + COALESCE(EXCLUDED.network_errors, 0),
-                    total_latency_ms = COALESCE(context7_minute_stats.total_latency_ms, 0) + COALESCE(EXCLUDED.total_latency_ms, 0),
-                    max_latency_ms = GREATEST(context7_minute_stats.max_latency_ms, EXCLUDED.max_latency_ms),
-                    last_status_code = EXCLUDED.last_status_code,
-                    last_error = EXCLUDED.last_error,
-                    updated_at = EXCLUDED.updated_at
-                "#,
-                item.api_key_id,
-                item.api_key_name,
-                item.minute_at,
-                item.total_requests,
-                item.success_requests,
-                item.failed_requests,
-                item.status_2xx,
-                item.status_4xx,
-                item.status_5xx,
-                item.network_errors,
-                item.total_latency_ms,
-                item.max_latency_ms,
-                item.last_status_code,
-                item.last_error,
-                item.updated_at
-            )
-            .execute(&mut *tx)
+            let on_conflict =
+                OnConflict::columns([minute_stat::Column::ApiKeyId, minute_stat::Column::MinuteAt])
+                    .update_columns([minute_stat::Column::ApiKeyName])
+                    .values([
+                        (
+                            minute_stat::Column::TotalRequests,
+                            accumulated("total_requests"),
+                        ),
+                        (
+                            minute_stat::Column::SuccessRequests,
+                            accumulated("success_requests"),
+                        ),
+                        (
+                            minute_stat::Column::FailedRequests,
+                            accumulated("failed_requests"),
+                        ),
+                        (minute_stat::Column::Status2xx, accumulated("status_2xx")),
+                        (minute_stat::Column::Status4xx, accumulated("status_4xx")),
+                        (minute_stat::Column::Status5xx, accumulated("status_5xx")),
+                        (
+                            minute_stat::Column::NetworkErrors,
+                            accumulated("network_errors"),
+                        ),
+                        (
+                            minute_stat::Column::TotalLatencyMs,
+                            accumulated("total_latency_ms"),
+                        ),
+                        (
+                            minute_stat::Column::MaxLatencyMs,
+                            Func::greatest([
+                                Expr::col((minute_stat::Entity, minute_stat::Column::MaxLatencyMs)),
+                                Expr::cust("EXCLUDED.max_latency_ms"),
+                            ])
+                            .into(),
+                        ),
+                        (
+                            minute_stat::Column::LastStatusCode,
+                            Expr::cust("EXCLUDED.last_status_code"),
+                        ),
+                        (
+                            minute_stat::Column::LastError,
+                            Expr::cust("EXCLUDED.last_error"),
+                        ),
+                        (
+                            minute_stat::Column::UpdatedAt,
+                            Expr::cust("EXCLUDED.updated_at"),
+                        ),
+                    ])
+                    .to_owned();
+
+            minute_stat::Entity::insert(minute_stat::ActiveModel {
+                api_key_id: Set(item.api_key_id),
+                api_key_name: Set(item.api_key_name),
+                minute_at: Set(item.minute_at),
+                total_requests: Set(item.total_requests),
+                success_requests: Set(item.success_requests),
+                failed_requests: Set(item.failed_requests),
+                status_2xx: Set(item.status_2xx),
+                status_4xx: Set(item.status_4xx),
+                status_5xx: Set(item.status_5xx),
+                network_errors: Set(item.network_errors),
+                total_latency_ms: Set(item.total_latency_ms),
+                max_latency_ms: Set(item.max_latency_ms),
+                last_status_code: Set(item.last_status_code),
+                last_error: Set(item.last_error),
+                updated_at: Set(item.updated_at),
+                ..Default::default()
+            })
+            .on_conflict(on_conflict)
+            .exec(&tx)
             .await?;
         }
 
@@ -519,19 +559,76 @@ impl Service {
     }
 }
 
+/// `COALESCE(current, 0) + COALESCE(EXCLUDED.<column>, 0)`, matching the
+/// accumulated counters that the pre-SeaORM SQL maintained in `DO UPDATE`.
+fn accumulated(column: &str) -> Expr {
+    Expr::cust(format!(
+        "COALESCE(context7_minute_stats.{column}, 0) + COALESCE(EXCLUDED.{column}, 0)"
+    ))
+}
+
 async fn recv_one(queue_rx: &Mutex<tokio::sync::mpsc::Receiver<Event>>) -> Option<Event> {
     queue_rx.lock().await.recv().await
 }
 
-fn push_log_filters<'a>(builder: &mut QueryBuilder<'a, sqlx::Postgres>, params: &'a LogQuery) {
+fn log_filters(params: &LogQuery) -> Condition {
+    let mut condition = Condition::all();
     if let Some(api_key_id) = params.api_key_id {
-        builder.push(" AND api_key_id = ").push_bind(api_key_id);
+        condition = condition.add(request_log::Column::ApiKeyId.eq(api_key_id));
     }
     if let Some(success) = params.success {
-        builder.push(" AND success = ").push_bind(success);
+        condition = condition.add(request_log::Column::Success.eq(success));
     }
     if let Some(status_code) = params.status_code {
-        builder.push(" AND status_code = ").push_bind(status_code);
+        condition = condition.add(request_log::Column::StatusCode.eq(status_code));
+    }
+    condition
+}
+
+fn minute_item(row: minute_stat::Model) -> MinuteItem {
+    let total_requests = i64::from(row.total_requests);
+    let success_requests = i64::from(row.success_requests);
+    MinuteItem {
+        api_key_id: row.api_key_id,
+        api_key_name: row.api_key_name,
+        minute_at: row.minute_at,
+        total_requests,
+        success_requests,
+        failed_requests: i64::from(row.failed_requests),
+        status_2xx: i64::from(row.status_2xx),
+        status_4xx: i64::from(row.status_4xx),
+        status_5xx: i64::from(row.status_5xx),
+        network_errors: i64::from(row.network_errors),
+        total_latency_ms: row.total_latency_ms,
+        max_latency_ms: row.max_latency_ms,
+        last_status_code: row.last_status_code,
+        last_error: row.last_error,
+        updated_at: row.updated_at,
+        success_rate: ratio_decimal(success_requests, total_requests),
+        average_latency_ms: ratio_decimal(row.total_latency_ms, total_requests),
+    }
+}
+
+fn log_item(row: request_log::Model) -> LogItem {
+    LogItem {
+        id: row.id,
+        api_key_id: row.api_key_id,
+        api_key_name: row.api_key_name,
+        method: row.method,
+        path: row.path,
+        query: row.query,
+        status_code: row.status_code,
+        success: row.success,
+        latency_ms: row.latency_ms,
+        error: row.error,
+        client_ip: row.client_ip,
+        user_agent: row.user_agent,
+        client_source: row.client_source,
+        client_ide: row.client_ide,
+        client_version: row.client_version,
+        transport: row.transport,
+        started_at: row.started_at,
+        finished_at: row.finished_at,
     }
 }
 
@@ -544,9 +641,8 @@ fn normalize_event(mut event: Event) -> Event {
         event.started_at = event.finished_at;
     }
     if event.latency_ms <= 0 {
-        event.latency_ms = (event.finished_at - event.started_at)
-            .num_milliseconds()
-            .max(0);
+        event.latency_ms =
+            std::cmp::Ord::max((event.finished_at - event.started_at).num_milliseconds(), 0);
     }
     event.api_key_name = event.api_key_name.trim().to_string();
     event.method = event.method.trim().to_string();
@@ -605,7 +701,7 @@ fn aggregate_events(batch: &[Event]) -> Vec<MinuteAggregate> {
             _ => {}
         }
         item.total_latency_ms += event.latency_ms;
-        item.max_latency_ms = item.max_latency_ms.max(event.latency_ms);
+        item.max_latency_ms = std::cmp::Ord::max(item.max_latency_ms, event.latency_ms);
         if event.finished_at >= item.last_finished_at {
             item.api_key_name = event.api_key_name.clone();
             item.last_status_code = event.status_code;

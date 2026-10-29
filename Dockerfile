@@ -11,8 +11,6 @@ FROM rust:1-slim-bookworm AS backend-builder
 WORKDIR /src/backend
 COPY backend/Cargo.toml ./
 COPY backend/Cargo.lock ./
-COPY backend/.sqlx ./.sqlx
-COPY backend/migrations ./migrations
 COPY backend/src ./src
 RUN cargo build --release --locked
 

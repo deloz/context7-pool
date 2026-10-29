@@ -19,8 +19,8 @@ async fn main() -> Result<()> {
         .init();
 
     let cfg = Config::load()?;
-    let pool = db::connect(&cfg.database_url).await?;
-    db::migrate(&pool).await?;
+    let database = db::connect(&cfg.database_url).await?;
+    db::migrate(&database).await?;
 
     let manager = pool::Manager::new(pool::Config {
         failure_threshold: cfg.failure_threshold,
@@ -28,20 +28,20 @@ async fn main() -> Result<()> {
         flush_interval: cfg.flush_interval,
         flush_batch_size: cfg.flush_batch_size,
     });
-    let settings_service = settings::Service::new(pool.clone());
+    let settings_service = settings::Service::new(database.clone());
     let stats_service = stats::Service::new(
-        pool.clone(),
+        database.clone(),
         stats::Config {
             flush_interval: cfg.flush_interval,
             batch_size: cfg.flush_batch_size,
             queue_size: 2048,
         },
     );
-    let auth_service = auth::Service::new(pool.clone());
+    let auth_service = auth::Service::new(database.clone());
     auth_service.bootstrap().await?;
 
     let admin_service = admin::Service::new(
-        pool.clone(),
+        database.clone(),
         manager.clone(),
         settings_service.clone(),
         stats_service.clone(),
