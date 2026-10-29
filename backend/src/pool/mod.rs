@@ -10,7 +10,10 @@ use std::{
 use chrono::{DateTime, Utc};
 use tokio::sync::{Mutex, RwLock, mpsc};
 
-use crate::models::{ApiKeyRow, ProxyKey, RuntimeMeta};
+use crate::{
+    entity::api_key,
+    models::{ProxyKey, RuntimeMeta},
+};
 
 #[derive(Clone, Debug)]
 pub struct Record {
@@ -28,8 +31,8 @@ pub struct Record {
     pub updated_at: DateTime<Utc>,
 }
 
-impl From<ApiKeyRow> for Record {
-    fn from(value: ApiKeyRow) -> Self {
+impl From<api_key::Model> for Record {
+    fn from(value: api_key::Model) -> Self {
         Self {
             id: value.id,
             name: value.name,

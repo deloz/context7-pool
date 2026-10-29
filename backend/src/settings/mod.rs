@@ -1,11 +1,13 @@
 use std::sync::Arc;
 
 use chrono::Utc;
-use sqlx::PgPool;
+use sea_orm::sea_query::OnConflict;
+use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, Set};
 use tokio::sync::RwLock;
 use url::Url;
 
 use crate::{
+    entity::setting,
     error::{AppError, AppResult},
     models::Context7Config,
 };
@@ -15,7 +17,7 @@ pub const DEFAULT_CONTEXT7_API_BASE_URL: &str = "https://context7.com/api";
 
 #[derive(Clone)]
 pub struct Service {
-    pool: PgPool,
+    db: DatabaseConnection,
     snapshot: Arc<RwLock<Snapshot>>,
 }
 
@@ -26,9 +28,9 @@ struct Snapshot {
 }
 
 impl Service {
-    pub fn new(pool: PgPool) -> Self {
+    pub fn new(db: DatabaseConnection) -> Self {
         Self {
-            pool,
+            db,
             snapshot: Arc::new(RwLock::new(Snapshot {
                 context7: Context7Config {
                     api_base_url: DEFAULT_CONTEXT7_API_BASE_URL.to_string(),
@@ -40,27 +42,26 @@ impl Service {
 
     pub async fn bootstrap(&self) -> AppResult<()> {
         let now = Utc::now();
-        sqlx::query!(
-            r#"
-            INSERT INTO settings (key, value, created_at, updated_at)
-            VALUES ($1, $2, $3, $3)
-            ON CONFLICT (key) DO NOTHING
-            "#,
-            CONTEXT7_API_BASE_URL_KEY,
-            DEFAULT_CONTEXT7_API_BASE_URL,
-            now
+        setting::Entity::insert(setting::ActiveModel {
+            key: Set(CONTEXT7_API_BASE_URL_KEY.to_string()),
+            value: Set(DEFAULT_CONTEXT7_API_BASE_URL.to_string()),
+            created_at: Set(now),
+            updated_at: Set(now),
+        })
+        .on_conflict(
+            OnConflict::column(setting::Column::Key)
+                .do_nothing()
+                .to_owned(),
         )
-        .execute(&self.pool)
+        .exec_without_returning(&self.db)
         .await?;
 
-        let value = sqlx::query_scalar!(
-            r#"SELECT value FROM settings WHERE key = $1"#,
-            CONTEXT7_API_BASE_URL_KEY
-        )
-        .fetch_one(&self.pool)
-        .await?;
+        let stored = setting::Entity::find_by_id(CONTEXT7_API_BASE_URL_KEY)
+            .one(&self.db)
+            .await?
+            .ok_or_else(|| AppError::Internal("context7 api base url missing".to_string()))?;
 
-        let parsed = validate_api_base_url(&value)?;
+        let parsed = validate_api_base_url(&stored.value)?;
         self.store_snapshot(parsed.to_string(), Some(parsed)).await;
         Ok(())
     }
@@ -81,19 +82,13 @@ impl Service {
         let parsed = validate_api_base_url(api_base_url)?;
         let value = parsed.to_string();
         let now = Utc::now();
-        let result = sqlx::query!(
-            r#"
-            UPDATE settings
-            SET value = $2, updated_at = $3
-            WHERE key = $1
-            "#,
-            CONTEXT7_API_BASE_URL_KEY,
-            value,
-            now
-        )
-        .execute(&self.pool)
-        .await?;
-        if result.rows_affected() == 0 {
+        let result = setting::Entity::update_many()
+            .col_expr(setting::Column::Value, value.clone().into())
+            .col_expr(setting::Column::UpdatedAt, now.into())
+            .filter(setting::Column::Key.eq(CONTEXT7_API_BASE_URL_KEY))
+            .exec(&self.db)
+            .await?;
+        if result.rows_affected == 0 {
             return Err(AppError::NotFound);
         }
 

@@ -4,15 +4,19 @@ use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use bcrypt::{DEFAULT_COST, hash, verify};
 use chrono::{DateTime, Duration, Utc};
 use rand::{TryRngCore, rngs::OsRng};
+use sea_orm::{
+    ActiveModelTrait, ColumnTrait, ConnectionTrait, DatabaseConnection, EntityTrait,
+    PaginatorTrait, QueryFilter, QueryOrder, QuerySelect, Set, TransactionTrait,
+};
 use sha2::{Digest, Sha256};
-use sqlx::{PgPool, Row};
 use tokio::sync::Mutex;
 
 use crate::{
+    entity::{admin_session, admin_user, relay_token},
     error::{AppError, AppResult},
     models::{
-        AdminIdentity, AdminSessionRow, AdminUserRow, RelayTokenItem, RelayTokenPage,
-        RelayTokenResponse, RelayTokenRow, RelayTokenView, TokenResponse,
+        AdminIdentity, RelayTokenItem, RelayTokenPage, RelayTokenResponse, RelayTokenView,
+        TokenResponse,
     },
 };
 
@@ -24,14 +28,14 @@ const RELAY_TOKEN_PREFIX: &str = "cpr_";
 
 #[derive(Clone)]
 pub struct Service {
-    pool: PgPool,
+    db: DatabaseConnection,
     admin_touch: Arc<Mutex<HashMap<i64, i64>>>,
 }
 
 impl Service {
-    pub fn new(pool: PgPool) -> Self {
+    pub fn new(db: DatabaseConnection) -> Self {
         Self {
-            pool,
+            db,
             admin_touch: Arc::new(Mutex::new(HashMap::new())),
         }
     }
@@ -64,42 +68,34 @@ impl Service {
         let now = Utc::now();
         let expires_at = now + ADMIN_SESSION_TTL;
 
-        let mut tx = self.pool.begin().await?;
-        sqlx::query!("LOCK TABLE admin_users IN EXCLUSIVE MODE")
-            .execute(&mut *tx)
+        let tx = self.db.begin().await?;
+        tx.execute_unprepared("LOCK TABLE admin_users IN EXCLUSIVE MODE")
             .await?;
-        let count = sqlx::query_scalar!("SELECT COUNT(*) FROM admin_users")
-            .fetch_one(&mut *tx)
-            .await?
-            .unwrap_or(0);
+
+        let count = admin_user::Entity::find().count(&tx).await?;
         if count > 0 {
             return Err(AppError::SetupAlreadyComplete);
         }
 
-        let user_id = sqlx::query_scalar!(
-            r#"
-            INSERT INTO admin_users (username, password_hash, created_at, updated_at)
-            VALUES ($1, $2, $3, $3)
-            RETURNING id
-            "#,
-            username,
-            password_hash,
-            now
-        )
-        .fetch_one(&mut *tx)
+        let user = admin_user::ActiveModel {
+            username: Set(username),
+            password_hash: Set(password_hash),
+            created_at: Set(now),
+            updated_at: Set(now),
+            ..Default::default()
+        }
+        .insert(&tx)
         .await?;
 
-        sqlx::query!(
-            r#"
-            INSERT INTO admin_sessions (admin_user_id, token_hash, expires_at, created_at, last_used_at)
-            VALUES ($1, $2, $3, $4, $4)
-            "#,
-            user_id,
-            token_hash,
-            expires_at,
-            now
-        )
-        .execute(&mut *tx)
+        admin_session::ActiveModel {
+            admin_user_id: Set(user.id),
+            token_hash: Set(token_hash),
+            expires_at: Set(expires_at),
+            created_at: Set(now),
+            last_used_at: Set(Some(now)),
+            ..Default::default()
+        }
+        .insert(&tx)
         .await?;
 
         tx.commit().await?;
@@ -112,14 +108,11 @@ impl Service {
             return Err(AppError::InvalidCredentials);
         }
 
-        let user = sqlx::query_as!(
-            AdminUserRow,
-            r#"SELECT id, username, password_hash FROM admin_users WHERE username = $1"#,
-            username
-        )
-        .fetch_optional(&self.pool)
-        .await?
-        .ok_or(AppError::InvalidCredentials)?;
+        let user = admin_user::Entity::find()
+            .filter(admin_user::Column::Username.eq(username))
+            .one(&self.db)
+            .await?
+            .ok_or(AppError::InvalidCredentials)?;
 
         if !verify(password, &user.password_hash)? {
             return Err(AppError::InvalidCredentials);
@@ -128,17 +121,15 @@ impl Service {
         let (token, token_hash) = generate_token(ADMIN_TOKEN_PREFIX)?;
         let now = Utc::now();
         let expires_at = now + ADMIN_SESSION_TTL;
-        sqlx::query!(
-            r#"
-            INSERT INTO admin_sessions (admin_user_id, token_hash, expires_at, created_at, last_used_at)
-            VALUES ($1, $2, $3, $4, $4)
-            "#,
-            user.id,
-            token_hash,
-            expires_at,
-            now
-        )
-        .execute(&self.pool)
+        admin_session::ActiveModel {
+            admin_user_id: Set(user.id),
+            token_hash: Set(token_hash),
+            expires_at: Set(expires_at),
+            created_at: Set(now),
+            last_used_at: Set(Some(now)),
+            ..Default::default()
+        }
+        .insert(&self.db)
         .await?;
 
         Ok(TokenResponse { token, expires_at })
@@ -152,47 +143,29 @@ impl Service {
         let token_hash = hash_token(token);
         let now = Utc::now();
 
-        let row = sqlx::query(
-            r#"
-            SELECT s.id AS session_id,
-                   s.admin_user_id,
-                   s.expires_at,
-                   s.last_used_at,
-                   u.username
-            FROM admin_sessions s
-            JOIN admin_users u ON u.id = s.admin_user_id
-            WHERE s.token_hash = $1 AND s.expires_at > $2
-            LIMIT 1
-            "#,
-        )
-        .bind(&token_hash)
-        .bind(now)
-        .fetch_optional(&self.pool)
-        .await?
-        .ok_or(AppError::Unauthorized)?;
+        let session = admin_session::Entity::find()
+            .find_also_related(admin_user::Entity)
+            .filter(admin_session::Column::TokenHash.eq(token_hash))
+            .filter(admin_session::Column::ExpiresAt.gt(now))
+            .one(&self.db)
+            .await?
+            .and_then(|(session, user)| Some((session, user?)))
+            .ok_or(AppError::Unauthorized)?;
 
-        let session = AdminSessionRow {
-            id: row.try_get("session_id")?,
-            admin_user_id: row.try_get("admin_user_id")?,
-            expires_at: row.try_get("expires_at")?,
-            last_used_at: row.try_get("last_used_at")?,
-        };
-        let username: String = row.try_get("username")?;
-
-        if self.should_touch_admin_session(&session, now).await {
-            sqlx::query!(
-                "UPDATE admin_sessions SET last_used_at = $2 WHERE id = $1",
-                session.id,
-                now
-            )
-            .execute(&self.pool)
-            .await?;
+        let (session, user) = session;
+        let touch = SessionTouch::new(&session, now);
+        if self.should_touch_admin_session(touch, now).await {
+            admin_session::Entity::update_many()
+                .col_expr(admin_session::Column::LastUsedAt, now.into())
+                .filter(admin_session::Column::Id.eq(session.id))
+                .exec(&self.db)
+                .await?;
         }
 
         Ok(AdminIdentity {
-            admin_user_id: session.admin_user_id,
+            admin_user_id: user.id,
             session_id: session.id,
-            username,
+            username: user.username,
         })
     }
 
@@ -201,12 +174,10 @@ impl Service {
             return Ok(());
         };
         let token_hash = hash_token(token);
-        sqlx::query!(
-            "DELETE FROM admin_sessions WHERE token_hash = $1",
-            token_hash
-        )
-        .execute(&self.pool)
-        .await?;
+        admin_session::Entity::delete_many()
+            .filter(admin_session::Column::TokenHash.eq(token_hash))
+            .exec(&self.db)
+            .await?;
         Ok(())
     }
 
@@ -221,15 +192,11 @@ impl Service {
             return Err(AppError::InvalidCredentials);
         }
 
-        let mut tx = self.pool.begin().await?;
-        let user = sqlx::query_as!(
-            AdminUserRow,
-            r#"SELECT id, username, password_hash FROM admin_users WHERE id = $1"#,
-            identity.admin_user_id
-        )
-        .fetch_optional(&mut *tx)
-        .await?
-        .ok_or(AppError::Unauthorized)?;
+        let tx = self.db.begin().await?;
+        let user = admin_user::Entity::find_by_id(identity.admin_user_id)
+            .one(&tx)
+            .await?
+            .ok_or(AppError::Unauthorized)?;
 
         if !verify(old_password, &user.password_hash)? {
             return Err(AppError::InvalidCredentials);
@@ -237,20 +204,18 @@ impl Service {
 
         let password_hash = hash(new_password, DEFAULT_COST)?;
         let now = Utc::now();
-        sqlx::query!(
-            "UPDATE admin_users SET password_hash = $2, updated_at = $3 WHERE id = $1",
-            user.id,
-            password_hash,
-            now
-        )
-        .execute(&mut *tx)
+        admin_user::ActiveModel {
+            id: Set(user.id),
+            password_hash: Set(password_hash),
+            updated_at: Set(now),
+            ..Default::default()
+        }
+        .update(&tx)
         .await?;
-        sqlx::query!(
-            "DELETE FROM admin_sessions WHERE admin_user_id = $1",
-            user.id
-        )
-        .execute(&mut *tx)
-        .await?;
+        admin_session::Entity::delete_many()
+            .filter(admin_session::Column::AdminUserId.eq(user.id))
+            .exec(&tx)
+            .await?;
         tx.commit().await?;
         Ok(())
     }
@@ -280,33 +245,26 @@ impl Service {
     }
 
     pub async fn list_relay_tokens(&self, page: i64, page_size: i64) -> AppResult<RelayTokenPage> {
-        let total =
-            sqlx::query_scalar!("SELECT COUNT(*) FROM relay_tokens WHERE revoked_at IS NULL")
-                .fetch_one(&self.pool)
-                .await?
-                .unwrap_or(0);
+        let total = relay_token::Entity::find()
+            .filter(relay_token::Column::RevokedAt.is_null())
+            .count(&self.db)
+            .await?;
         let offset = page
             .checked_sub(1)
             .and_then(|value| value.checked_mul(page_size))
             .ok_or_else(|| AppError::BadRequest("page is too large".to_string()))?;
-        let rows = sqlx::query_as!(
-            RelayTokenRow,
-            r#"
-            SELECT id, name, token_hash, token, masked_token, created_at, last_used_at
-            FROM relay_tokens
-            WHERE revoked_at IS NULL
-            ORDER BY created_at DESC, id DESC
-            LIMIT $1 OFFSET $2
-            "#,
-            page_size,
-            offset
-        )
-        .fetch_all(&self.pool)
-        .await?;
+        let rows = relay_token::Entity::find()
+            .filter(relay_token::Column::RevokedAt.is_null())
+            .order_by_desc(relay_token::Column::CreatedAt)
+            .order_by_desc(relay_token::Column::Id)
+            .offset(offset as u64)
+            .limit(page_size as u64)
+            .all(&self.db)
+            .await?;
 
         Ok(RelayTokenPage {
             items: rows.into_iter().map(relay_token_item).collect(),
-            total,
+            total: total as i64,
             page,
             page_size,
         })
@@ -322,20 +280,17 @@ impl Service {
         let masked_token = mask_token(&token);
         let now = Utc::now();
 
-        let row = sqlx::query_as!(
-            RelayTokenRow,
-            r#"
-            INSERT INTO relay_tokens (name, token_hash, token, masked_token, created_at)
-            VALUES ($1, $2, $3, $4, $5)
-            RETURNING id, name, token_hash, token, masked_token, created_at, last_used_at
-            "#,
-            name,
-            token_hash,
-            token,
-            masked_token,
-            now
-        )
-        .fetch_one(&self.pool)
+        let row = relay_token::ActiveModel {
+            name: Set(name),
+            token_hash: Set(token_hash),
+            token: Set(Some(token)),
+            masked_token: Set(masked_token),
+            created_at: Set(now),
+            last_used_at: Set(None),
+            revoked_at: Set(None),
+            ..Default::default()
+        }
+        .insert(&self.db)
         .await?;
 
         Ok(relay_token_response(row))
@@ -343,67 +298,55 @@ impl Service {
 
     pub async fn update_relay_token(&self, id: i64, name: &str) -> AppResult<RelayTokenItem> {
         let name = normalize_relay_token_name(name);
-        let row = sqlx::query_as!(
-            RelayTokenRow,
-            r#"
-            UPDATE relay_tokens
-            SET name = $2
-            WHERE id = $1 AND revoked_at IS NULL
-            RETURNING id, name, token_hash, token, masked_token, created_at, last_used_at
-            "#,
-            id,
-            name
-        )
-        .fetch_optional(&self.pool)
-        .await?
-        .ok_or(AppError::NotFound)?;
+        let result = relay_token::Entity::update_many()
+            .col_expr(relay_token::Column::Name, name.into())
+            .filter(relay_token::Column::Id.eq(id))
+            .filter(relay_token::Column::RevokedAt.is_null())
+            .exec(&self.db)
+            .await?;
+        if result.rows_affected == 0 {
+            return Err(AppError::NotFound);
+        }
+        let row = relay_token::Entity::find_by_id(id)
+            .one(&self.db)
+            .await?
+            .ok_or(AppError::NotFound)?;
 
         Ok(relay_token_item(row))
     }
 
     pub async fn rotate_relay_token(&self, id: i64) -> AppResult<RelayTokenResponse> {
-        let mut tx = self.pool.begin().await?;
-        let current = sqlx::query_as!(
-            RelayTokenRow,
-            r#"
-            SELECT id, name, token_hash, token, masked_token, created_at, last_used_at
-            FROM relay_tokens
-            WHERE id = $1 AND revoked_at IS NULL
-            "#,
-            id
-        )
-        .fetch_optional(&mut *tx)
-        .await?
-        .ok_or(AppError::NotFound)?;
+        let tx = self.db.begin().await?;
+        let current = relay_token::Entity::find_by_id(id)
+            .filter(relay_token::Column::RevokedAt.is_null())
+            .one(&tx)
+            .await?
+            .ok_or(AppError::NotFound)?;
 
         let now = Utc::now();
-        let result = sqlx::query!(
-            "UPDATE relay_tokens SET revoked_at = $2 WHERE id = $1 AND revoked_at IS NULL",
-            id,
-            now
-        )
-        .execute(&mut *tx)
-        .await?;
-        if result.rows_affected() == 0 {
+        let result = relay_token::Entity::update_many()
+            .col_expr(relay_token::Column::RevokedAt, now.into())
+            .filter(relay_token::Column::Id.eq(id))
+            .filter(relay_token::Column::RevokedAt.is_null())
+            .exec(&tx)
+            .await?;
+        if result.rows_affected == 0 {
             return Err(AppError::NotFound);
         }
 
         let (token, token_hash) = generate_token(RELAY_TOKEN_PREFIX)?;
         let masked_token = mask_token(&token);
-        let row = sqlx::query_as!(
-            RelayTokenRow,
-            r#"
-            INSERT INTO relay_tokens (name, token_hash, token, masked_token, created_at)
-            VALUES ($1, $2, $3, $4, $5)
-            RETURNING id, name, token_hash, token, masked_token, created_at, last_used_at
-            "#,
-            current.name,
-            token_hash,
-            token,
-            masked_token,
-            now
-        )
-        .fetch_one(&mut *tx)
+        let row = relay_token::ActiveModel {
+            name: Set(current.name),
+            token_hash: Set(token_hash),
+            token: Set(Some(token)),
+            masked_token: Set(masked_token),
+            created_at: Set(now),
+            last_used_at: Set(None),
+            revoked_at: Set(None),
+            ..Default::default()
+        }
+        .insert(&tx)
         .await?;
         tx.commit().await?;
 
@@ -412,14 +355,13 @@ impl Service {
 
     pub async fn delete_relay_token(&self, id: i64) -> AppResult<()> {
         let now = Utc::now();
-        let result = sqlx::query!(
-            "UPDATE relay_tokens SET revoked_at = $2 WHERE id = $1 AND revoked_at IS NULL",
-            id,
-            now
-        )
-        .execute(&self.pool)
-        .await?;
-        if result.rows_affected() == 0 {
+        let result = relay_token::Entity::update_many()
+            .col_expr(relay_token::Column::RevokedAt, now.into())
+            .filter(relay_token::Column::Id.eq(id))
+            .filter(relay_token::Column::RevokedAt.is_null())
+            .exec(&self.db)
+            .await?;
+        if result.rows_affected == 0 {
             return Err(AppError::NotFound);
         }
         Ok(())
@@ -427,22 +369,22 @@ impl Service {
 
     pub async fn revoke_relay_token(&self) -> AppResult<()> {
         let now = Utc::now();
-        sqlx::query!(
-            r#"
-            UPDATE relay_tokens
-            SET revoked_at = $1
-            WHERE id = (
-                SELECT id
-                FROM relay_tokens
-                WHERE revoked_at IS NULL
-                ORDER BY created_at DESC, id DESC
-                LIMIT 1
-            )
-            "#,
-            now
-        )
-        .execute(&self.pool)
-        .await?;
+        let latest = relay_token::Entity::find()
+            .filter(relay_token::Column::RevokedAt.is_null())
+            .order_by_desc(relay_token::Column::CreatedAt)
+            .order_by_desc(relay_token::Column::Id)
+            .one(&self.db)
+            .await?;
+        let Some(latest) = latest else {
+            return Ok(());
+        };
+
+        relay_token::Entity::update_many()
+            .col_expr(relay_token::Column::RevokedAt, now.into())
+            .filter(relay_token::Column::Id.eq(latest.id))
+            .filter(relay_token::Column::RevokedAt.is_null())
+            .exec(&self.db)
+            .await?;
         Ok(())
     }
 
@@ -453,60 +395,40 @@ impl Service {
         }
         let token_hash = hash_token(token);
         let now = Utc::now();
-        let row = sqlx::query!(
-            r#"
-            SELECT id
-            FROM relay_tokens
-            WHERE token_hash = $1 AND revoked_at IS NULL
-            LIMIT 1
-            "#,
-            token_hash
-        )
-        .fetch_optional(&self.pool)
-        .await?
-        .ok_or(AppError::Unauthorized)?;
+        let row = relay_token::Entity::find()
+            .filter(relay_token::Column::TokenHash.eq(token_hash))
+            .filter(relay_token::Column::RevokedAt.is_null())
+            .one(&self.db)
+            .await?
+            .ok_or(AppError::Unauthorized)?;
 
-        let result = sqlx::query!(
-            "UPDATE relay_tokens SET last_used_at = $2 WHERE id = $1 AND revoked_at IS NULL",
-            row.id,
-            now
-        )
-        .execute(&self.pool)
-        .await?;
-        if result.rows_affected() == 0 {
+        let result = relay_token::Entity::update_many()
+            .col_expr(relay_token::Column::LastUsedAt, now.into())
+            .filter(relay_token::Column::Id.eq(row.id))
+            .filter(relay_token::Column::RevokedAt.is_null())
+            .exec(&self.db)
+            .await?;
+        if result.rows_affected == 0 {
             return Err(AppError::Unauthorized);
         }
         Ok(())
     }
 
     async fn setup_required(&self) -> AppResult<bool> {
-        let count = sqlx::query_scalar!("SELECT COUNT(*) FROM admin_users")
-            .fetch_one(&self.pool)
-            .await?
-            .unwrap_or(0);
+        let count = admin_user::Entity::find().count(&self.db).await?;
         Ok(count == 0)
     }
 
-    async fn current_relay_token(&self) -> AppResult<Option<RelayTokenRow>> {
-        Ok(sqlx::query_as!(
-            RelayTokenRow,
-            r#"
-            SELECT id, name, token_hash, token, masked_token, created_at, last_used_at
-            FROM relay_tokens
-            WHERE revoked_at IS NULL
-            ORDER BY created_at DESC, id DESC
-            LIMIT 1
-            "#
-        )
-        .fetch_optional(&self.pool)
-        .await?)
+    async fn current_relay_token(&self) -> AppResult<Option<relay_token::Model>> {
+        Ok(relay_token::Entity::find()
+            .filter(relay_token::Column::RevokedAt.is_null())
+            .order_by_desc(relay_token::Column::CreatedAt)
+            .order_by_desc(relay_token::Column::Id)
+            .one(&self.db)
+            .await?)
     }
 
-    async fn should_touch_admin_session(
-        &self,
-        session: &AdminSessionRow,
-        now: DateTime<Utc>,
-    ) -> bool {
+    async fn should_touch_admin_session(&self, session: SessionTouch, now: DateTime<Utc>) -> bool {
         if let Some(last_used_at) = session.last_used_at
             && (now - last_used_at).num_seconds() < ADMIN_SESSION_TOUCH_INTERVAL_SECONDS
         {
@@ -587,7 +509,7 @@ fn mask_token(token: &str) -> String {
     }
 }
 
-fn relay_token_item(row: RelayTokenRow) -> RelayTokenItem {
+fn relay_token_item(row: relay_token::Model) -> RelayTokenItem {
     RelayTokenItem {
         id: row.id,
         name: row.name,
@@ -598,7 +520,7 @@ fn relay_token_item(row: RelayTokenRow) -> RelayTokenItem {
     }
 }
 
-fn relay_token_response(row: RelayTokenRow) -> RelayTokenResponse {
+fn relay_token_response(row: relay_token::Model) -> RelayTokenResponse {
     RelayTokenResponse {
         id: row.id,
         name: row.name,
@@ -606,5 +528,19 @@ fn relay_token_response(row: RelayTokenRow) -> RelayTokenResponse {
         masked_token: row.masked_token,
         created_at: row.created_at,
         last_used_at: row.last_used_at,
+    }
+}
+
+struct SessionTouch {
+    id: i64,
+    last_used_at: Option<DateTime<Utc>>,
+}
+
+impl SessionTouch {
+    fn new(session: &admin_session::Model, _now: DateTime<Utc>) -> Self {
+        Self {
+            id: session.id,
+            last_used_at: session.last_used_at,
+        }
     }
 }

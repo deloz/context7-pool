@@ -17,8 +17,8 @@ ContextPool is a self-hosted Context7 relay service. It keeps a pool of upstream
 
 ## Architecture
 
-- Backend: Rust service built with Axum and SQLx.
-- Database: PostgreSQL, accessed through SQLx migrations and queries.
+- Backend: Rust service built with Axum and SeaORM.
+- Database: PostgreSQL, managed by strongly typed SeaORM migrations and queries.
 - Frontend: Vue 3, Vite, TypeScript, and Element Plus.
 - Runtime: one application container serving the backend API and built frontend assets, plus one PostgreSQL container.
 - Admin UI: served from `/admin/`.

@@ -3,6 +3,7 @@ use axum::{
     http::StatusCode,
     response::{IntoResponse, Response},
 };
+use sea_orm::DbErr;
 use serde::Serialize;
 use thiserror::Error;
 
@@ -25,7 +26,7 @@ pub enum AppError {
     #[error("request body too large for retry")]
     PayloadTooLarge,
     #[error(transparent)]
-    Sqlx(#[from] sqlx::Error),
+    Db(#[from] DbErr),
     #[error(transparent)]
     Bcrypt(#[from] bcrypt::BcryptError),
     #[error(transparent)]
@@ -51,8 +52,8 @@ impl AppError {
             Self::ServiceUnavailable(_) => StatusCode::SERVICE_UNAVAILABLE,
             Self::BadGateway(_) => StatusCode::BAD_GATEWAY,
             Self::PayloadTooLarge => StatusCode::PAYLOAD_TOO_LARGE,
-            Self::Sqlx(sqlx::Error::RowNotFound) => StatusCode::NOT_FOUND,
-            Self::Sqlx(_) | Self::Bcrypt(_) | Self::Anyhow(_) | Self::Internal(_) => {
+            Self::Db(DbErr::RecordNotFound(_) | DbErr::RecordNotUpdated) => StatusCode::NOT_FOUND,
+            Self::Db(_) | Self::Bcrypt(_) | Self::Anyhow(_) | Self::Internal(_) => {
                 StatusCode::INTERNAL_SERVER_ERROR
             }
         }
@@ -63,7 +64,9 @@ impl AppError {
             Self::InvalidCredentials => "invalid credentials".to_string(),
             Self::Unauthorized => "unauthorized".to_string(),
             Self::SetupAlreadyComplete => "setup already completed".to_string(),
-            Self::Sqlx(sqlx::Error::RowNotFound) => "resource not found".to_string(),
+            Self::Db(DbErr::RecordNotFound(_) | DbErr::RecordNotUpdated) => {
+                "resource not found".to_string()
+            }
             other => other.to_string(),
         }
     }
@@ -77,9 +80,9 @@ impl IntoResponse for AppError {
     }
 }
 
-pub fn not_found_from_sqlx(err: sqlx::Error) -> AppError {
+pub fn not_found_from_db(err: DbErr) -> AppError {
     match err {
-        sqlx::Error::RowNotFound => AppError::NotFound,
-        other => AppError::Sqlx(other),
+        DbErr::RecordNotFound(_) | DbErr::RecordNotUpdated => AppError::NotFound,
+        other => AppError::Db(other),
     }
 }

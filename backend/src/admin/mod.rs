@@ -1,17 +1,21 @@
 use chrono::Utc;
+use sea_orm::sea_query::Expr;
+use sea_orm::{
+    ActiveModelTrait, ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, QueryOrder, Set,
+};
 use serde::Serialize;
-use sqlx::PgPool;
 
 use crate::{
-    error::{AppError, AppResult, not_found_from_sqlx},
-    models::{ApiKeyRow, CreateKeyInput, KeyView, RuntimeMeta, UpdateKeyInput},
+    entity::api_key,
+    error::{AppError, AppResult},
+    models::{CreateKeyInput, KeyView, RuntimeMeta, UpdateKeyInput},
     pool::{Manager, PersistedState, Record},
     settings, stats,
 };
 
 #[derive(Clone)]
 pub struct Service {
-    pool: PgPool,
+    db: DatabaseConnection,
     manager: Manager,
     settings: settings::Service,
     stats: stats::Service,
@@ -24,13 +28,13 @@ pub struct KeyListResponse {
 
 impl Service {
     pub fn new(
-        pool: PgPool,
+        db: DatabaseConnection,
         manager: Manager,
         settings: settings::Service,
         stats: stats::Service,
     ) -> Self {
         Self {
-            pool,
+            db,
             manager,
             settings,
             stats,
@@ -45,18 +49,10 @@ impl Service {
     }
 
     pub async fn list_keys(&self) -> AppResult<Vec<KeyView>> {
-        let items = sqlx::query_as!(
-            ApiKeyRow,
-            r#"
-            SELECT id, name, api_key, enabled, health_status, failure_streak,
-                   cooldown_until, last_error, last_status_code, last_success_at,
-                   created_at, updated_at
-            FROM api_keys
-            ORDER BY id ASC
-            "#
-        )
-        .fetch_all(&self.pool)
-        .await?;
+        let items = api_key::Entity::find()
+            .order_by_asc(api_key::Column::Id)
+            .all(&self.db)
+            .await?;
 
         let mut views = Vec::with_capacity(items.len());
         for item in items {
@@ -72,22 +68,17 @@ impl Service {
         let enabled = input.enabled.unwrap_or(true);
         let now = Utc::now();
 
-        let item = sqlx::query_as!(
-            ApiKeyRow,
-            r#"
-            INSERT INTO api_keys
-                (name, api_key, enabled, health_status, failure_streak, created_at, updated_at)
-            VALUES ($1, $2, $3, 'healthy', 0, $4, $4)
-            RETURNING id, name, api_key, enabled, health_status, failure_streak,
-                      cooldown_until, last_error, last_status_code, last_success_at,
-                      created_at, updated_at
-            "#,
-            name,
-            api_key,
-            enabled,
-            now
-        )
-        .fetch_one(&self.pool)
+        let item = api_key::ActiveModel {
+            name: Set(name),
+            api_key: Set(api_key),
+            enabled: Set(enabled),
+            health_status: Set("healthy".to_string()),
+            failure_streak: Set(0),
+            created_at: Set(now),
+            updated_at: Set(now),
+            ..Default::default()
+        }
+        .insert(&self.db)
         .await?;
 
         let record: Record = item.into();
@@ -96,7 +87,7 @@ impl Service {
     }
 
     pub async fn get_key(&self, id: i64) -> AppResult<KeyView> {
-        let item = self.get_key_row(id).await?;
+        let item = self.get_key_model(id).await?;
         let record = self.manager.overlay(item.into(), Utc::now()).await;
         Ok(view_from_record(record))
     }
@@ -105,7 +96,7 @@ impl Service {
         if id <= 0 {
             return Err(AppError::BadRequest("invalid id".to_string()));
         }
-        let current = self.get_key_row(id).await?;
+        let current = self.get_key_model(id).await?;
         let name = match input.name {
             Some(value) => trim_required(&value, "name")?,
             None => current.name,
@@ -117,25 +108,15 @@ impl Service {
         let enabled = input.enabled.unwrap_or(current.enabled);
         let now = Utc::now();
 
-        let item = sqlx::query_as!(
-            ApiKeyRow,
-            r#"
-            UPDATE api_keys
-            SET name = $2, api_key = $3, enabled = $4, updated_at = $5
-            WHERE id = $1
-            RETURNING id, name, api_key, enabled, health_status, failure_streak,
-                      cooldown_until, last_error, last_status_code, last_success_at,
-                      created_at, updated_at
-            "#,
-            id,
-            name,
-            api_key,
-            enabled,
-            now
-        )
-        .fetch_one(&self.pool)
-        .await
-        .map_err(not_found_from_sqlx)?;
+        let active = api_key::ActiveModel {
+            id: Set(id),
+            name: Set(name),
+            api_key: Set(api_key),
+            enabled: Set(enabled),
+            updated_at: Set(now),
+            ..Default::default()
+        };
+        let item = active.update(&self.db).await?;
 
         let record: Record = item.into();
         self.manager.put_record(record.clone(), Utc::now()).await;
@@ -144,10 +125,11 @@ impl Service {
     }
 
     pub async fn delete_key(&self, id: i64) -> AppResult<()> {
-        let result = sqlx::query!("DELETE FROM api_keys WHERE id = $1", id)
-            .execute(&self.pool)
+        let result = api_key::Entity::delete_many()
+            .filter(api_key::Column::Id.eq(id))
+            .exec(&self.db)
             .await?;
-        if result.rows_affected() == 0 {
+        if result.rows_affected == 0 {
             return Err(AppError::NotFound);
         }
         self.manager.delete_record(id, Utc::now()).await;
@@ -155,27 +137,24 @@ impl Service {
     }
 
     pub async fn reset_health(&self, id: i64) -> AppResult<KeyView> {
-        let item = sqlx::query_as!(
-            ApiKeyRow,
-            r#"
-            UPDATE api_keys
-            SET health_status = 'healthy',
-                failure_streak = 0,
-                cooldown_until = NULL,
-                last_error = NULL,
-                last_status_code = NULL,
-                updated_at = $2
-            WHERE id = $1
-            RETURNING id, name, api_key, enabled, health_status, failure_streak,
-                      cooldown_until, last_error, last_status_code, last_success_at,
-                      created_at, updated_at
-            "#,
-            id,
-            Utc::now()
-        )
-        .fetch_one(&self.pool)
-        .await
-        .map_err(not_found_from_sqlx)?;
+        if id <= 0 {
+            return Err(AppError::BadRequest("invalid id".to_string()));
+        }
+
+        let active = api_key::ActiveModel {
+            id: Set(id),
+            health_status: Set("healthy".to_string()),
+            failure_streak: Set(0),
+            cooldown_until: Set(None),
+            last_error: Set(None),
+            last_status_code: Set(None),
+            updated_at: Set(Utc::now()),
+            ..Default::default()
+        };
+        let item = active
+            .update(&self.db)
+            .await
+            .map_err(crate::error::not_found_from_db)?;
 
         self.manager.reset_health(id, Utc::now()).await;
         let record = self.manager.overlay(item.into(), Utc::now()).await;
@@ -190,30 +169,28 @@ impl Service {
 
     pub async fn flush_runtime_states(&self, states: Vec<PersistedState>) -> anyhow::Result<()> {
         for state in states {
-            let result = sqlx::query!(
-                r#"
-                UPDATE api_keys
-                SET health_status = $2,
-                    failure_streak = $3,
-                    cooldown_until = $4,
-                    last_error = $5,
-                    last_status_code = $6,
-                    last_success_at = COALESCE($7, last_success_at),
-                    updated_at = $8
-                WHERE id = $1
-                "#,
-                state.id,
-                state.health_status,
-                state.failure_streak,
-                state.cooldown_until,
-                state.last_error,
-                state.last_status_code,
-                state.last_success_at,
-                Utc::now()
-            )
-            .execute(&self.pool)
-            .await?;
-            if result.rows_affected() == 0 {
+            let last_success_at = match state.last_success_at {
+                Some(value) => Expr::value(value),
+                None => Expr::col(api_key::Column::LastSuccessAt),
+            };
+            let result = api_key::Entity::update_many()
+                .col_expr(
+                    api_key::Column::HealthStatus,
+                    state.health_status.clone().into(),
+                )
+                .col_expr(api_key::Column::FailureStreak, state.failure_streak.into())
+                .col_expr(api_key::Column::CooldownUntil, state.cooldown_until.into())
+                .col_expr(api_key::Column::LastError, state.last_error.clone().into())
+                .col_expr(
+                    api_key::Column::LastStatusCode,
+                    state.last_status_code.into(),
+                )
+                .col_expr(api_key::Column::LastSuccessAt, last_success_at)
+                .col_expr(api_key::Column::UpdatedAt, Utc::now().into())
+                .filter(api_key::Column::Id.eq(state.id))
+                .exec(&self.db)
+                .await?;
+            if result.rows_affected == 0 {
                 tracing::warn!("skip flushing missing api key state id={}", state.id);
             }
         }
@@ -239,39 +216,21 @@ impl Service {
         self.settings.clone()
     }
 
-    async fn get_key_row(&self, id: i64) -> AppResult<ApiKeyRow> {
+    async fn get_key_model(&self, id: i64) -> AppResult<api_key::Model> {
         if id <= 0 {
             return Err(AppError::BadRequest("invalid id".to_string()));
         }
-        sqlx::query_as!(
-            ApiKeyRow,
-            r#"
-            SELECT id, name, api_key, enabled, health_status, failure_streak,
-                   cooldown_until, last_error, last_status_code, last_success_at,
-                   created_at, updated_at
-            FROM api_keys
-            WHERE id = $1
-            "#,
-            id
-        )
-        .fetch_one(&self.pool)
-        .await
-        .map_err(not_found_from_sqlx)
+        api_key::Entity::find_by_id(id)
+            .one(&self.db)
+            .await?
+            .ok_or(AppError::NotFound)
     }
 
     async fn load_records(&self) -> AppResult<Vec<Record>> {
-        let rows = sqlx::query_as!(
-            ApiKeyRow,
-            r#"
-            SELECT id, name, api_key, enabled, health_status, failure_streak,
-                   cooldown_until, last_error, last_status_code, last_success_at,
-                   created_at, updated_at
-            FROM api_keys
-            ORDER BY id ASC
-            "#
-        )
-        .fetch_all(&self.pool)
-        .await?;
+        let rows = api_key::Entity::find()
+            .order_by_asc(api_key::Column::Id)
+            .all(&self.db)
+            .await?;
         Ok(rows.into_iter().map(Record::from).collect())
     }
 }
