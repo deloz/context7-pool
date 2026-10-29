@@ -2,125 +2,126 @@ name: Release
 
 on:
   push:
-    tags:
-      - "v*.*.*"
+    branches:
+      - main
 
 permissions:
-  contents: write
-  packages: write
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  IMAGE_NAME: ghcr.io/deloz/context7-pool
 
 jobs:
-  release:
-    name: Publish release
+  test:
+    name: Test
+    uses: ./.github/workflows/test.yml
+
+  publish:
+    name: Publish release image
+    needs: test
     runs-on: ubuntu-latest
-    services:
-      postgres:
-        image: postgres:18-alpine
-        env:
-          POSTGRES_DB: contextpool
-          POSTGRES_USER: contextpool
-          POSTGRES_PASSWORD: contextpool
-        ports:
-          - 45432:5432
-        options: >-
-          --health-cmd "pg_isready -U contextpool -d contextpool"
-          --health-interval 5s
-          --health-timeout 3s
-          --health-retries 20
-    env:
-      CARGO_TERM_COLOR: always
-      DATABASE_URL: postgres://contextpool:contextpool@127.0.0.1:45432/contextpool
-      SQLX_OFFLINE: "true"
-      IMAGE_NAME: ghcr.io/deloz/context7-pool
+    permissions:
+      contents: read
+      packages: write
 
     steps:
       - name: Checkout
         uses: actions/checkout@v7
-
-      - name: Set up Node.js
-        uses: actions/setup-node@v7
         with:
-          node-version: "24"
-          cache: npm
-          cache-dependency-path: frontend/package-lock.json
+          fetch-depth: 2
 
-      - name: Show Rust toolchain
-        run: rustup show
-
-      - name: Check Rust formatting
-        run: cargo fmt --manifest-path backend/Cargo.toml --check
-
-      - name: Run Rust clippy
-        run: cargo clippy --manifest-path backend/Cargo.toml --locked -- -D warnings
-
-      - name: Run Rust tests
-        run: cargo test --manifest-path backend/Cargo.toml --locked
-
-      - name: Install frontend dependencies
-        working-directory: frontend
-        run: npm ci
-
-      - name: Build frontend
-        working-directory: frontend
-        run: npm run build
-
-      - name: Verify release version
+      - name: Detect release version
+        id: detect
         run: |
-          if [[ ! "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo "Release tag must match vX.Y.Z, got $GITHUB_REF_NAME"
+          set -euo pipefail
+
+          old_version="$(
+            git show HEAD^:.release-please-manifest.json 2>/dev/null \
+              | jq -r '.backend // empty' 2>/dev/null \
+              || true
+          )"
+          new_version="$(jq -r '.backend // empty' .release-please-manifest.json)"
+
+          if [[ ! "$new_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Manifest version must match X.Y.Z, got '$new_version'"
             exit 1
           fi
 
-          tag_version="${GITHUB_REF_NAME#v}"
+          if [ "$new_version" = "0.0.0" ] || [ "$old_version" = "$new_version" ]; then
+            echo "No new release version detected."
+            exit 0
+          fi
+
+          if git ls-remote --exit-code --tags origin "refs/tags/v${new_version}" >/dev/null 2>&1; then
+            echo "Tag v${new_version} already exists; skipping image publish."
+            exit 0
+          fi
+
           cargo_version="$(
             cargo metadata --manifest-path backend/Cargo.toml --format-version 1 --no-deps \
               | jq -r '.packages[] | select(.name == "contextpool") | .version'
           )"
 
-          if [ "$cargo_version" != "$tag_version" ]; then
-            echo "backend/Cargo.toml version ($cargo_version) does not match tag $GITHUB_REF_NAME"
+          if [ "$cargo_version" != "$new_version" ]; then
+            echo "backend/Cargo.toml version ($cargo_version) does not match manifest version ($new_version)"
             exit 1
           fi
 
+          major="${new_version%%.*}"
+          minor="${new_version#*.}"
+          minor="${minor%%.*}"
+
+          {
+            echo "publish=true"
+            echo "version=${new_version}"
+            echo "major=${major}"
+            echo "minor=${minor}"
+          } >> "$GITHUB_OUTPUT"
+
       - name: Set up Docker Buildx
+        if: steps.detect.outputs.publish == 'true'
         uses: docker/setup-buildx-action@v4
 
       - name: Log in to GHCR
+        if: steps.detect.outputs.publish == 'true'
         uses: docker/login-action@v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Generate Docker metadata
-        id: meta
-        uses: docker/metadata-action@v6
-        with:
-          images: ${{ env.IMAGE_NAME }}
-          flavor: |
-            latest=false
-          tags: |
-            type=ref,event=tag
-            type=semver,pattern={{major}}.{{minor}}
-            type=semver,pattern={{major}}
-            type=raw,value=latest
-
       - name: Build and push Docker image
+        if: steps.detect.outputs.publish == 'true'
         uses: docker/build-push-action@v7
         with:
           context: .
           push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
+          tags: |
+            ${{ env.IMAGE_NAME }}:latest
+            ${{ env.IMAGE_NAME }}:v${{ steps.detect.outputs.version }}
+            ${{ env.IMAGE_NAME }}:${{ steps.detect.outputs.version }}
+            ${{ env.IMAGE_NAME }}:${{ steps.detect.outputs.major }}.${{ steps.detect.outputs.minor }}
+            ${{ env.IMAGE_NAME }}:${{ steps.detect.outputs.major }}
 
-      - name: Create GitHub Release
-        env:
-          GH_TOKEN: ${{ github.token }}
-          TAG: ${{ github.ref_name }}
-        run: |
-          gh release create "$TAG" \
-            --repo "$GITHUB_REPOSITORY" \
-            --verify-tag \
-            --title "$TAG" \
-            --notes "Docker image: \`$IMAGE_NAME:$TAG\`" \
-            --generate-notes
+  release-please:
+    name: Release Please
+    needs:
+      - test
+      - publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      issues: write
+      pull-requests: write
+
+    steps:
+      - name: Run release-please
+        uses: googleapis/release-please-action@v4
+        with:
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
