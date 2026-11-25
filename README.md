@@ -70,6 +70,14 @@ Application configuration is read from environment variables. Empty values are i
 | `CONTEXTPOOL_DATABASE_URL` | `postgres://contextpool:contextpool@127.0.0.1:45432/contextpool` | Primary PostgreSQL connection URL. |
 | `DATABASE_URL` | unset | Fallback PostgreSQL connection URL when `CONTEXTPOOL_DATABASE_URL` is not set. |
 | `CONTEXTPOOL_UPSTREAM_BASE_URL` | unset | Optional generic upstream base URL for non-admin fallback proxy requests. |
+| `CONTEXTPOOL_UPSTREAM_CONNECT_TIMEOUT` | `4s` | Upstream TCP/TLS connect timeout. |
+| `CONTEXTPOOL_UPSTREAM_REQUEST_TIMEOUT` | `15s` | Single upstream attempt timeout (including response body read). |
+| `CONTEXTPOOL_UPSTREAM_TOTAL_TIMEOUT` | `25s` | Overall relay budget across retries for one inbound request. |
+| `CONTEXTPOOL_UPSTREAM_MAX_ATTEMPTS` | `3` | Maximum upstream retry attempts per inbound request. |
+| `CONTEXTPOOL_UPSTREAM_PROXY` | unset | Optional HTTP/HTTPS/SOCKS proxy URL for outbound upstream requests. |
+| `CONTEXTPOOL_UPSTREAM_RESOLVE_ADDRS` | unset | Optional static multi-IP overrides (`host=ip1,ip2;...`) rotated per attempt. |
+| `CONTEXTPOOL_UPSTREAM_DISCOVERY_DOMAINS` | unset | Optional dynamic DNS discovery aliases (`host=alias1,alias2;...`) probed periodically. |
+| `CONTEXTPOOL_UPSTREAM_PROBE_INTERVAL` | `5m` | Periodic upstream IP discovery/probe interval (`0` disables probing). |
 | `CONTEXTPOOL_FAILURE_THRESHOLD` | `3` | Consecutive upstream failures before a key enters the cooling state. |
 | `CONTEXTPOOL_COOLDOWN_SECONDS` | `30` | Cooling duration in seconds before a failed key can be selected again. |
 | `CONTEXTPOOL_FLUSH_BATCH_SIZE` | `64` | Maximum number of buffered runtime state and stats updates flushed at once. |
@@ -87,11 +95,12 @@ Use the generated relay token in the `Authorization` header:
 Authorization: Bearer <relay-token>
 ```
 
-The Context7 relay currently exposes these paths:
+The Context7 relay exposes `/relay/context7/v2/...` GET endpoints, including:
 
 ```text
 GET /relay/context7/v2/libs/search
 GET /relay/context7/v2/context
+GET /relay/context7/v2/mcp/experimental-tools
 ```
 
 For local Compose runs, call them through the application host port:

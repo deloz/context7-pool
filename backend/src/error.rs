@@ -22,6 +22,8 @@ pub enum AppError {
     #[error("{0}")]
     ServiceUnavailable(String),
     #[error("{0}")]
+    GatewayTimeout(String),
+    #[error("{0}")]
     BadGateway(String),
     #[error("request body too large for retry")]
     PayloadTooLarge,
@@ -50,6 +52,7 @@ impl AppError {
             Self::NotFound => StatusCode::NOT_FOUND,
             Self::BadRequest(_) => StatusCode::BAD_REQUEST,
             Self::ServiceUnavailable(_) => StatusCode::SERVICE_UNAVAILABLE,
+            Self::GatewayTimeout(_) => StatusCode::GATEWAY_TIMEOUT,
             Self::BadGateway(_) => StatusCode::BAD_GATEWAY,
             Self::PayloadTooLarge => StatusCode::PAYLOAD_TOO_LARGE,
             Self::Db(DbErr::RecordNotFound(_) | DbErr::RecordNotUpdated) => StatusCode::NOT_FOUND,

@@ -724,10 +724,13 @@ fn optional_string(value: &str) -> Option<String> {
 
 fn limit_string(value: String) -> String {
     if value.len() <= MAX_STORED_TEXT_LENGTH {
-        value
-    } else {
-        value[..MAX_STORED_TEXT_LENGTH].to_string()
+        return value;
     }
+    let mut end = MAX_STORED_TEXT_LENGTH;
+    while end > 0 && !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    value[..end].to_string()
 }
 
 fn ratio_decimal(numerator: i64, denominator: i64) -> f64 {
@@ -760,5 +763,24 @@ impl Default for Event {
             started_at: DateTime::<Utc>::UNIX_EPOCH,
             finished_at: DateTime::<Utc>::UNIX_EPOCH,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn limit_string_truncates_on_utf8_boundary() {
+        let prefix = "a".repeat(MAX_STORED_TEXT_LENGTH - 1);
+        let input = format!("{prefix}中剩余内容");
+        let limited = limit_string(input);
+        assert_eq!(limited.len(), MAX_STORED_TEXT_LENGTH - 1);
+        assert_eq!(limited, prefix);
+
+        let all_cjk = "中".repeat(MAX_STORED_TEXT_LENGTH);
+        let limited_cjk = limit_string(all_cjk);
+        assert!(limited_cjk.len() <= MAX_STORED_TEXT_LENGTH);
+        assert_eq!(limited_cjk.len() % 3, 0);
     }
 }

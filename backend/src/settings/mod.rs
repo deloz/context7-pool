@@ -102,6 +102,12 @@ impl Service {
             target,
         };
     }
+
+    #[cfg(test)]
+    pub(crate) async fn set_test_target(&self, api_base_url: &str) {
+        let parsed = validate_api_base_url(api_base_url).unwrap();
+        self.store_snapshot(parsed.to_string(), Some(parsed)).await;
+    }
 }
 
 pub fn validate_api_base_url(raw: &str) -> AppResult<Url> {

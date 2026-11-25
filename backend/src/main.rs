@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use anyhow::Result;
 use contextpool::{
     admin, auth,
@@ -48,12 +50,46 @@ async fn main() -> Result<()> {
     );
     admin_service.bootstrap().await?;
 
-    let proxy_service = proxy::Service::new(
+    let proxy_service = proxy::Service::with_config(
         manager.clone(),
         settings_service,
         stats_service.clone(),
         cfg.upstream_base_url.clone(),
+        proxy::ProxyConfig {
+            connect_timeout: cfg.upstream_connect_timeout,
+            request_timeout: cfg.upstream_request_timeout,
+            total_timeout: cfg.upstream_total_timeout,
+            max_attempts: cfg.upstream_max_attempts,
+            proxy_url: cfg.upstream_proxy_url.clone(),
+            resolve_addrs: cfg.upstream_resolve_addrs.clone(),
+            discovery_domains: cfg.upstream_discovery_domains.clone(),
+            probe_interval: cfg.upstream_probe_interval,
+        },
     )?;
+
+    let probe_task = if let Some(resolver) = proxy_service.resolver() {
+        tracing::info!(
+            hosts = ?resolver.managed_hosts(),
+            probe_interval_secs = cfg.upstream_probe_interval.map(|d| d.as_secs()),
+            connect_timeout_ms = cfg.upstream_connect_timeout.as_millis(),
+            request_timeout_ms = cfg.upstream_request_timeout.as_millis(),
+            total_timeout_ms = cfg.upstream_total_timeout.as_millis(),
+            max_attempts = cfg.upstream_max_attempts,
+            "upstream custom resolver enabled"
+        );
+        resolver.warmup(Duration::from_secs(3)).await;
+        Some(tokio::spawn(async move { resolver.run().await }))
+    } else {
+        tracing::info!(
+            connect_timeout_ms = cfg.upstream_connect_timeout.as_millis(),
+            request_timeout_ms = cfg.upstream_request_timeout.as_millis(),
+            total_timeout_ms = cfg.upstream_total_timeout.as_millis(),
+            max_attempts = cfg.upstream_max_attempts,
+            proxy_configured = cfg.upstream_proxy_url.is_some(),
+            "upstream proxy settings loaded"
+        );
+        None
+    };
 
     let app = http::router(AppState {
         auth: auth_service,
@@ -85,6 +121,9 @@ async fn main() -> Result<()> {
         .with_graceful_shutdown(shutdown_signal())
         .await?;
 
+    if let Some(task) = probe_task {
+        task.abort();
+    }
     stats_task.abort();
     manager_task.abort();
     let _ = stats_service.flush().await;
